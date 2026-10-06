@@ -17,6 +17,8 @@ public static class DataServiceExtensions
         services.AddDbContext<AppDbContext>(o => o.UseNpgsql(cs));
         services.AddScoped<ChangeLogWriter>();
         services.AddScoped<Seeder>();
+        services.AddScoped<Sync.SyncProcessor>();
+        services.AddScoped<Sync.SyncQueryService>();
         services.AddSingleton<IPasswordHasher<User>, PasswordHasher<User>>();
         services.Configure<SeedOptions>(config.GetSection("Seed"));
         return services;
