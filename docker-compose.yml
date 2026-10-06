@@ -1,0 +1,59 @@
+services:
+  db:
+    image: postgres:17-alpine
+    container_name: asistencia_db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-asistencia}
+      POSTGRES_USER: ${POSTGRES_USER:-asistencia}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-asistencia_dev}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-asistencia} -d ${POSTGRES_DB:-asistencia}"]
+      interval: 3s
+      timeout: 3s
+      retries: 5
+
+  api:
+    build:
+      context: .
+      dockerfile: backend/Asistencia.Api/Dockerfile
+    container_name: asistencia_api
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    ports:
+      - "${API_PORT:-5080}:5080"
+    environment:
+      ConnectionStrings__Default: "Host=db;Port=5432;Database=${POSTGRES_DB:-asistencia};Username=${POSTGRES_USER:-asistencia};Password=${POSTGRES_PASSWORD:-asistencia_dev}"
+      Database__MigrateOnStartup: "true"
+      Seed__Enabled: "true"
+      Seed__TeacherPassword: ${SEED_TEACHER_PASSWORD:-clave-docente-segura-123}
+      ASPNETCORE_ENVIRONMENT: "Development"
+
+  tests:
+    image: mcr.microsoft.com/dotnet/sdk:10.0
+    container_name: asistencia_tests
+    profiles:
+      - test
+    depends_on:
+      db:
+        condition: service_healthy
+    working_dir: /src
+    volumes:
+      - .:/src
+      - nuget_cache:/nuget
+    environment:
+      DOTNET_CLI_TELEMETRY_OPTOUT: "1"
+      DOTNET_NOLOGO: "1"
+      NUGET_PACKAGES: "/nuget"
+      TEST_DATABASE_URL: "Host=db;Port=5432;Username=${POSTGRES_USER:-asistencia};Password=${POSTGRES_PASSWORD:-asistencia_dev};Database=postgres"
+    command: ["dotnet", "test", "backend/Asistencia.Tests/Asistencia.Tests.csproj", "--logger", "console;verbosity=normal"]
+
+volumes:
+  pgdata:
+  nuget_cache:
