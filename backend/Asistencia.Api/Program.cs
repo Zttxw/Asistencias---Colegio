@@ -29,6 +29,29 @@ api.MapGet("/health", async (AppDbContext db, CancellationToken ct) =>
     return dbOk ? Results.Ok(body) : Results.Json(body, statusCode: StatusCodes.Status503ServiceUnavailable);
 });
 
+// Bootstrap para inicializar datos base del piloto en la tablet (docente, sección y alumnos)
+api.MapGet("/bootstrap", async (AppDbContext db, CancellationToken ct) =>
+{
+    var teacher = await db.Teachers.Include(t => t.User).FirstOrDefaultAsync(ct);
+    var section = await db.Sections.FirstOrDefaultAsync(ct);
+    var student = await db.Students.FirstOrDefaultAsync(ct);
+
+    if (teacher is null || section is null || student is null)
+        return Results.NotFound(new { error = "No hay datos semilla en el servidor" });
+
+    return Results.Ok(new
+    {
+        teacherId = teacher.Id,
+        teacherName = teacher.FullName,
+        sectionId = section.Id,
+        sectionName = $"{section.Grade} \"{section.Name}\"",
+        studentId = student.Id,
+        studentName = student.FullName,
+        studentCode = student.Code,
+        serverDate = LimaClock.Today()
+    });
+});
+
 // Protocolo de sincronización: subida
 api.MapPost("/sync", async (Asistencia.Api.Sync.SyncPushRequest request,
                             Asistencia.Api.Sync.SyncProcessor processor,

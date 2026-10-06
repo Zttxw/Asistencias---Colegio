@@ -3,6 +3,7 @@ import { db } from './db';
 import { syncOfflineData } from './syncClient';
 
 export function AttendanceApp() {
+  if (typeof window !== 'undefined') (window as any).__db = db;
   const [selectedStatus, setSelectedStatus] = useState<'PRESENT' | 'ABSENT' | 'LATE' | 'EXCUSED'>('ABSENT');
   const [note, setNote] = useState('');
   const [isOnline, setIsOnline] = useState(navigator.onLine);
@@ -11,14 +12,14 @@ export function AttendanceApp() {
   const [syncStatus, setSyncStatus] = useState<'idle' | 'syncing' | 'error'>('idle');
   const [lastSyncMsg, setLastSyncMsg] = useState<string>('Esperando sincronización');
 
-  // Datos fijos del alumno y sección para el vertical slice (1 docente, 1 alumno)
-  const defaultSectionId = '11111111-1111-1111-1111-111111111111';
-  const defaultTeacherId = '22222222-2222-2222-2222-222222222222';
-  const defaultStudentId = '33333333-3333-3333-3333-333333333333';
-  const studentName = 'Quispe Huamán, Ana';
+  const [sectionId, setSectionId] = useState('7d0f1642-be34-44f3-aaf6-7cca3f0ef3ff');
+  const [teacherId, setTeacherId] = useState('4fc02a4d-7d32-468c-84e3-23a5fc7689e5');
+  const [studentId, setStudentId] = useState('0a714f06-fe73-4cb1-9c21-aa5ed7b6b530');
+  const [studentName, setStudentName] = useState('Pari Ancco, Gloria');
+  const [studentCode, setStudentCode] = useState('A023');
+  const [currentDate, setCurrentDate] = useState<string>(() => new Date().toISOString().split('T')[0]);
 
-  // Obtener fecha del día en formato YYYY-MM-DD
-  const todayStr = new Date().toISOString().split('T')[0];
+  const todayStr = currentDate;
 
   const refreshCounts = useCallback(async () => {
     const pSessions = await db.classSessions.where('syncState').equals('PENDING').count();
@@ -31,6 +32,39 @@ export function AttendanceApp() {
   }, []);
 
   useEffect(() => {
+    // Cargar bootstrap desde el servidor o desde IndexedDB si ya fue guardado
+    async function initBootstrap() {
+      const cached = await db.metadata.get('bootstrap');
+      if (cached) {
+        try {
+          const parsed = JSON.parse(cached.value);
+          setSectionId(parsed.sectionId);
+          setTeacherId(parsed.teacherId);
+          setStudentId(parsed.studentId);
+          setStudentName(parsed.studentName);
+          setStudentCode(parsed.studentCode);
+          if (parsed.serverDate) setCurrentDate(parsed.serverDate);
+        } catch {}
+      }
+
+      try {
+        const res = await fetch('/api/bootstrap');
+        if (res.ok) {
+          const data = await res.json();
+          setSectionId(data.sectionId);
+          setTeacherId(data.teacherId);
+          setStudentId(data.studentId);
+          setStudentName(data.studentName);
+          setStudentCode(data.studentCode);
+          if (data.serverDate) setCurrentDate(data.serverDate);
+          await db.metadata.put({ key: 'bootstrap', value: JSON.stringify(data) });
+        }
+      } catch {
+        // En offline usa los datos en caché
+      }
+    }
+
+    initBootstrap();
     refreshCounts();
 
     const handleOnline = () => {
@@ -52,7 +86,10 @@ export function AttendanceApp() {
     try {
       const summary = await syncOfflineData();
       await refreshCounts();
-      if (summary.errorsCount > 0) {
+      if (summary.networkError) {
+        setSyncStatus('error');
+        setLastSyncMsg('Error de conexión con el servidor.');
+      } else if (summary.errorsCount > 0) {
         setSyncStatus('error');
         setLastSyncMsg(`Error en ${summary.errorsCount} registros.`);
       } else {
@@ -66,19 +103,20 @@ export function AttendanceApp() {
   };
 
   const handleSaveAttendance = async () => {
+    setSyncStatus('syncing');
     const nowIso = new Date().toISOString();
 
     // 1. Obtener o crear la sesión de hoy en Dexie
     let session = await db.classSessions
       .where('[sectionId+date+slot]')
-      .equals([defaultSectionId, todayStr, 'JORNADA'])
+      .equals([sectionId, todayStr, 'JORNADA'])
       .first();
 
     if (!session) {
       session = {
         id: crypto.randomUUID(),
-        sectionId: defaultSectionId,
-        teacherId: defaultTeacherId,
+        sectionId: sectionId,
+        teacherId: teacherId,
         date: todayStr,
         slot: 'JORNADA',
         status: 'TAKEN',
@@ -94,14 +132,14 @@ export function AttendanceApp() {
     // 2. Crear o actualizar la asistencia del alumno
     let record = await db.attendanceRecords
       .where('[sessionId+studentId]')
-      .equals([session.id, defaultStudentId])
+      .equals([session.id, studentId])
       .first();
 
     if (!record) {
       record = {
         id: crypto.randomUUID(),
         sessionId: session.id,
-        studentId: defaultStudentId,
+        studentId: studentId,
         status: selectedStatus,
         note: note ? note : undefined,
         isVoid: false,
@@ -124,9 +162,11 @@ export function AttendanceApp() {
 
     await refreshCounts();
 
-    // Si hay conexión, intentar sync inmediatamente en background
+    // Si hay conexión, intentar sync inmediatamente
     if (navigator.onLine) {
-      triggerSync();
+      await triggerSync();
+    } else {
+      setSyncStatus('idle');
     }
   };
 
@@ -135,20 +175,23 @@ export function AttendanceApp() {
       {/* Indicador Global de Sincronización (6.3) */}
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1.5rem', padding: '0.8rem', background: '#fff', borderRadius: '8px', boxShadow: '0 2px 4px rgba(0,0,0,0.05)' }}>
         <div>
-          {pendingCount > 0 ? (
-            <span style={{ fontSize: '1.1rem', fontWeight: 600, color: '#d97706' }}>🟡 {pendingCount} pendiente{pendingCount > 1 ? 's' : ''}</span>
+          {syncStatus === 'syncing' ? (
+            <span data-testid="sync-indicator-syncing" style={{ fontSize: '1.1rem', fontWeight: 600, color: '#2563eb' }}>🔄 Sincronizando...</span>
           ) : syncStatus === 'error' ? (
-            <span style={{ fontSize: '1.1rem', fontWeight: 600, color: '#dc2626' }}>🔴 Error de sincronización</span>
+            <span data-testid="sync-indicator-error" style={{ fontSize: '1.1rem', fontWeight: 600, color: '#dc2626' }}>🔴 Error de sincronización</span>
+          ) : pendingCount > 0 ? (
+            <span data-testid="sync-indicator-pending" style={{ fontSize: '1.1rem', fontWeight: 600, color: '#d97706' }}>🟡 {pendingCount} pendiente{pendingCount > 1 ? 's' : ''}</span>
           ) : (
-            <span style={{ fontSize: '1.1rem', fontWeight: 600, color: '#16a34a' }}>🟢 Sincronizado</span>
+            <span data-testid="sync-indicator-synced" style={{ fontSize: '1.1rem', fontWeight: 600, color: '#16a34a' }}>🟢 Sincronizado</span>
           )}
-          <div style={{ fontSize: '0.75rem', color: '#666', marginTop: '4px' }}>
+          <div data-testid="sync-message" style={{ fontSize: '0.75rem', color: '#666', marginTop: '4px' }}>
             {isOnline ? 'Conexión activa' : 'Sin conexión (Modo Offline)'} • {lastSyncMsg}
           </div>
         </div>
 
         <button
           onClick={triggerSync}
+          data-testid="btn-retry"
           disabled={syncStatus === 'syncing'}
           style={{ padding: '0.5rem 0.9rem', fontSize: '0.9rem', cursor: 'pointer', borderRadius: '6px', border: '1px solid #ccc', background: '#f3f4f6' }}
         >
@@ -163,14 +206,15 @@ export function AttendanceApp() {
         </div>
 
         <div style={{ padding: '1rem', background: '#f8fafc', borderRadius: '8px', marginBottom: '1.5rem', border: '1px solid #e2e8f0' }}>
-          <div style={{ fontWeight: 700, fontSize: '1.1rem', color: '#1e293b' }}>{studentName}</div>
-          <div style={{ fontSize: '0.8rem', color: '#64748b' }}>Código: A001 • 1° "A"</div>
+          <div data-testid="student-name" style={{ fontWeight: 700, fontSize: '1.1rem', color: '#1e293b' }}>{studentName}</div>
+          <div data-testid="student-info" style={{ fontSize: '0.8rem', color: '#64748b' }}>Código: {studentCode} • 1° "A"</div>
         </div>
 
         <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0.6rem', marginBottom: '1rem' }}>
           {(['PRESENT', 'ABSENT', 'LATE', 'EXCUSED'] as const).map((st) => (
             <button
               key={st}
+              data-testid={`btn-status-${st.toLowerCase()}`}
               onClick={() => setSelectedStatus(st)}
               style={{
                 padding: '0.9rem',
@@ -195,6 +239,7 @@ export function AttendanceApp() {
           <label style={{ display: 'block', fontSize: '0.85rem', fontWeight: 600, marginBottom: '4px', color: '#475569' }}>Nota (opcional):</label>
           <input
             type="text"
+            data-testid="input-note"
             value={note}
             onChange={(e) => setNote(e.target.value)}
             placeholder="Ej: Justificación médica"
@@ -204,6 +249,7 @@ export function AttendanceApp() {
 
         <button
           onClick={handleSaveAttendance}
+          data-testid="btn-save"
           style={{
             width: '100%',
             padding: '1rem',

@@ -467,4 +467,335 @@ public sealed class SyncProtocolTests(PostgresFixture fx) : IClassFixture<Postgr
         Assert.Empty(noMore.Changes);
         Assert.Equal(changesResp.NextCursor, noMore.NextCursor);
     }
+
+    [Fact]
+    public async Task Push_LostAckChainContinuation_FromDifferentDevice_ReturnsConflict()
+    {
+        // 1.3: Device A envía versión 1 (ACK se pierde o Device B tiene baseVersion obsoleta)
+        // Device B envía modificación usando baseVersion antigua -> CONFLICT (no accepted)
+        await using var db = fx.CreateContext();
+        var data = await BaseData.CreateAsync(db);
+        var proc = NewProcessor(db);
+
+        var sessionId = Guid.NewGuid();
+        var attId = Guid.NewGuid();
+
+        // Device A inserta versión 1
+        var respA = await proc.ProcessPushAsync(new SyncPushRequest
+        {
+            DeviceId = Dev1,
+            Items =
+            [
+                new SyncPushItem
+                {
+                    Entity = EntityNames.ClassSession,
+                    Id = sessionId,
+                    BaseVersion = 0,
+                    Data = JsonSerializer.SerializeToElement(new { sectionId = data.SectionId, teacherId = data.TeacherId, date = Day.AddDays(7), slot = "JORNADA", status = "TAKEN" })
+                },
+                new SyncPushItem
+                {
+                    Entity = EntityNames.AttendanceRecord,
+                    Id = attId,
+                    BaseVersion = 0,
+                    Data = JsonSerializer.SerializeToElement(new { sessionId = sessionId, studentId = data.StudentAId, status = "ABSENT" })
+                }
+            ]
+        }, data.UserId);
+
+        Assert.All(respA.Results, r => Assert.Equal(SyncItemStatus.Accepted, r.Status));
+
+        // Device B envía modificación usando baseVersion = 0 (desactualizada)
+        var respB = await proc.ProcessPushAsync(new SyncPushRequest
+        {
+            DeviceId = Dev2, // Diferente dispositivo!
+            Items =
+            [
+                new SyncPushItem
+                {
+                    Entity = EntityNames.AttendanceRecord,
+                    Id = attId,
+                    BaseVersion = 0, // Antigua
+                    Data = JsonSerializer.SerializeToElement(new { sessionId = sessionId, studentId = data.StudentAId, status = "LATE" })
+                }
+            ]
+        }, data.UserId);
+
+        Assert.Single(respB.Results);
+        Assert.Equal(SyncItemStatus.Conflict, respB.Results[0].Status);
+        Assert.Equal(1, respB.Results[0].ServerVersion);
+
+        // El registro del servidor no debe ser sobrescrito
+        var unchanged = await db.AttendanceRecords.FindAsync(attId);
+        Assert.Equal(AttendanceStatus.Absent, unchanged!.Status);
+        Assert.Equal(1, unchanged.Version);
+    }
+
+    [Fact]
+    public async Task Push_SameDataDifferentMetadata_ReturnsDuplicate()
+    {
+        // 2.2: Enviar exactamente el mismo contenido lógico pero cambiar clientUpdatedAt y baseVersion
+        await using var db = fx.CreateContext();
+        var data = await BaseData.CreateAsync(db);
+        var proc = NewProcessor(db);
+
+        var sessionId = Guid.NewGuid();
+        var attId = Guid.NewGuid();
+
+        var initialTime = DateTimeOffset.UtcNow.AddHours(-1);
+        var push1 = await proc.ProcessPushAsync(new SyncPushRequest
+        {
+            DeviceId = Dev1,
+            Items =
+            [
+                new SyncPushItem
+                {
+                    Entity = EntityNames.ClassSession,
+                    Id = sessionId,
+                    BaseVersion = 0,
+                    ClientUpdatedAt = initialTime,
+                    Data = JsonSerializer.SerializeToElement(new { sectionId = data.SectionId, teacherId = data.TeacherId, date = Day.AddDays(8), slot = "JORNADA", status = "TAKEN" })
+                },
+                new SyncPushItem
+                {
+                    Entity = EntityNames.AttendanceRecord,
+                    Id = attId,
+                    BaseVersion = 0,
+                    ClientUpdatedAt = initialTime,
+                    Data = JsonSerializer.SerializeToElement(new { sessionId = sessionId, studentId = data.StudentAId, status = "PRESENT" })
+                }
+            ]
+        }, data.UserId);
+
+        Assert.All(push1.Results, r => Assert.Equal(SyncItemStatus.Accepted, r.Status));
+        var cursorBefore = push1.ServerCursor;
+
+        var recordBefore = await db.AttendanceRecords.AsNoTracking().FirstAsync(r => r.Id == attId);
+        var initialUpdatedAt = recordBefore.UpdatedAt;
+        var initialVersion = recordBefore.Version;
+
+        // Reenvío con datos lógicos idénticos pero diferente clientUpdatedAt y baseVersion
+        var newClientTime = DateTimeOffset.UtcNow.AddMinutes(10);
+        var push2 = await proc.ProcessPushAsync(new SyncPushRequest
+        {
+            DeviceId = Dev1,
+            Items =
+            [
+                new SyncPushItem
+                {
+                    Entity = EntityNames.AttendanceRecord,
+                    Id = attId,
+                    BaseVersion = 99, // baseVersion diferente
+                    ClientUpdatedAt = newClientTime, // fecha de cliente diferente
+                    Data = JsonSerializer.SerializeToElement(new { sessionId = sessionId, studentId = data.StudentAId, status = "PRESENT" }) // mismo dato lógico
+                }
+            ]
+        }, data.UserId);
+
+        Assert.Single(push2.Results);
+        Assert.Equal(SyncItemStatus.Duplicate, push2.Results[0].Status);
+        Assert.Equal(initialVersion, push2.Results[0].ServerVersion);
+
+        // Validar que no se incrementó versión, no cambió updated_at en BD y no se creó change_log
+        var recordAfter = await db.AttendanceRecords.AsNoTracking().FirstAsync(r => r.Id == attId);
+        Assert.Equal(initialVersion, recordAfter.Version);
+        Assert.Equal(initialUpdatedAt, recordAfter.UpdatedAt);
+        Assert.Equal(cursorBefore, push2.ServerCursor);
+    }
+
+    [Fact]
+    public async Task Push_DuplicateAttendanceLogicalKey_ReturnsConflictWithCanonicalRecord()
+    {
+        // 2.3: attendance UUID A (session X, student Y) existe.
+        // Enviar attendance UUID B (session X, student Y) -> conflict con canónico, sin crear segunda asistencia.
+        await using var db = fx.CreateContext();
+        var data = await BaseData.CreateAsync(db);
+        var proc = NewProcessor(db);
+
+        var sessionId = Guid.NewGuid();
+        var attIdA = Guid.NewGuid();
+        var attIdB = Guid.NewGuid();
+
+        // Crear sesión y asistencia A
+        await proc.ProcessPushAsync(new SyncPushRequest
+        {
+            DeviceId = Dev1,
+            Items =
+            [
+                new SyncPushItem
+                {
+                    Entity = EntityNames.ClassSession,
+                    Id = sessionId,
+                    BaseVersion = 0,
+                    Data = JsonSerializer.SerializeToElement(new { sectionId = data.SectionId, teacherId = data.TeacherId, date = Day.AddDays(9), slot = "JORNADA", status = "TAKEN" })
+                },
+                new SyncPushItem
+                {
+                    Entity = EntityNames.AttendanceRecord,
+                    Id = attIdA,
+                    BaseVersion = 0,
+                    Data = JsonSerializer.SerializeToElement(new { sessionId = sessionId, studentId = data.StudentAId, status = "PRESENT" })
+                }
+            ]
+        }, data.UserId);
+
+        // Enviar asistencia B con diferente UUID pero misma clave lógica (session X, student Y)
+        var respB = await proc.ProcessPushAsync(new SyncPushRequest
+        {
+            DeviceId = Dev2,
+            Items =
+            [
+                new SyncPushItem
+                {
+                    Entity = EntityNames.AttendanceRecord,
+                    Id = attIdB,
+                    BaseVersion = 0,
+                    Data = JsonSerializer.SerializeToElement(new { sessionId = sessionId, studentId = data.StudentAId, status = "ABSENT" })
+                }
+            ]
+        }, data.UserId);
+
+        Assert.Single(respB.Results);
+        Assert.Equal(SyncItemStatus.Conflict, respB.Results[0].Status);
+        Assert.NotNull(respB.Results[0].Current);
+
+        var currentJson = JsonSerializer.Serialize(respB.Results[0].Current);
+        Assert.Contains(attIdA.ToString(), currentJson);
+
+        // Comprobar que en BD no se creó la segunda asistencia
+        var total = await db.AttendanceRecords.CountAsync(r => r.SessionId == sessionId && r.StudentId == data.StudentAId);
+        Assert.Equal(1, total);
+        Assert.Null(await db.AttendanceRecords.FindAsync(attIdB));
+    }
+
+    [Fact]
+    public async Task Push_AttendanceBeforeSession_RejectsAttendanceWithoutOrphanRecord()
+    {
+        // 2.4: Si el lote envía asistencia antes que sesión, el servidor rechaza la asistencia
+        // por sesión inexistente (cumple contrato: tablet envía sesión antes que asistencias).
+        await using var db = fx.CreateContext();
+        var data = await BaseData.CreateAsync(db);
+        var proc = NewProcessor(db);
+
+        var nonExistentSessionId = Guid.NewGuid();
+        var attId = Guid.NewGuid();
+
+        var resp = await proc.ProcessPushAsync(new SyncPushRequest
+        {
+            DeviceId = Dev1,
+            Items =
+            [
+                new SyncPushItem
+                {
+                    Entity = EntityNames.AttendanceRecord,
+                    Id = attId,
+                    BaseVersion = 0,
+                    Data = JsonSerializer.SerializeToElement(new { sessionId = nonExistentSessionId, studentId = data.StudentAId, status = "PRESENT" })
+                }
+            ]
+        }, data.UserId);
+
+        Assert.Single(resp.Results);
+        Assert.Equal(SyncItemStatus.Rejected, resp.Results[0].Status);
+        Assert.Contains("no encontrada", resp.Results[0].Error);
+
+        // Jamás persiste un registro huérfano
+        Assert.Null(await db.AttendanceRecords.FindAsync(attId));
+    }
+
+    [Fact]
+    public async Task Push_ConcurrentEndpointRequests_SerializeCommits_AndNoGapsInIncrementalQuery()
+    {
+        // 2.1: Dos POST /api/sync simultáneos al procesador con diferentes contextos
+        await using var dbMain = fx.CreateContext();
+        var data = await BaseData.CreateAsync(dbMain);
+
+        var queryService = NewQueryService(dbMain);
+        var initialChanges = await queryService.GetChangesAsync(0);
+        var baseCursor = initialChanges.NextCursor;
+
+        var sessionId1 = Guid.NewGuid();
+        var attId1 = Guid.NewGuid();
+
+        var sessionId2 = Guid.NewGuid();
+        var attId2 = Guid.NewGuid();
+
+        var task1 = Task.Run(async () =>
+        {
+            await using var db1 = fx.CreateContext();
+            var p1 = NewProcessor(db1);
+            return await p1.ProcessPushAsync(new SyncPushRequest
+            {
+                DeviceId = Dev1,
+                Items =
+                [
+                    new SyncPushItem
+                    {
+                        Entity = EntityNames.ClassSession,
+                        Id = sessionId1,
+                        BaseVersion = 0,
+                        Data = JsonSerializer.SerializeToElement(new { sectionId = data.SectionId, teacherId = data.TeacherId, date = Day.AddDays(11), slot = "HORA-1", status = "TAKEN" })
+                    },
+                    new SyncPushItem
+                    {
+                        Entity = EntityNames.AttendanceRecord,
+                        Id = attId1,
+                        BaseVersion = 0,
+                        Data = JsonSerializer.SerializeToElement(new { sessionId = sessionId1, studentId = data.StudentAId, status = "PRESENT" })
+                    }
+                ]
+            }, data.UserId);
+        });
+
+        var task2 = Task.Run(async () =>
+        {
+            await using var db2 = fx.CreateContext();
+            var p2 = NewProcessor(db2);
+            return await p2.ProcessPushAsync(new SyncPushRequest
+            {
+                DeviceId = Dev2,
+                Items =
+                [
+                    new SyncPushItem
+                    {
+                        Entity = EntityNames.ClassSession,
+                        Id = sessionId2,
+                        BaseVersion = 0,
+                        Data = JsonSerializer.SerializeToElement(new { sectionId = data.SectionId, teacherId = data.TeacherId, date = Day.AddDays(12), slot = "HORA-2", status = "TAKEN" })
+                    },
+                    new SyncPushItem
+                    {
+                        Entity = EntityNames.AttendanceRecord,
+                        Id = attId2,
+                        BaseVersion = 0,
+                        Data = JsonSerializer.SerializeToElement(new { sessionId = sessionId2, studentId = data.StudentBId, status = "LATE" })
+                    }
+                ]
+            }, data.UserId);
+        });
+
+        var results = await Task.WhenAll(task1, task2);
+        var r1 = results[0];
+        var r2 = results[1];
+
+        Assert.All(r1.Results, r => Assert.Equal(SyncItemStatus.Accepted, r.Status));
+        Assert.All(r2.Results, r => Assert.Equal(SyncItemStatus.Accepted, r.Status));
+
+        // Verificar que los cambios confirmados son continuos y no hay saltos
+        await using var verifyDb = fx.CreateContext();
+        var changes = await verifyDb.ChangeLog
+            .Where(c => c.ServerChangeId > baseCursor)
+            .OrderBy(c => c.ServerChangeId)
+            .ToListAsync();
+
+        Assert.Equal(4, changes.Count); // 2 sesiones + 2 asistencias
+        var assignedIds = changes.Select(c => c.ServerChangeId).ToList();
+        Assert.Equal(assignedIds.Distinct().Count(), assignedIds.Count); // Sin duplicados
+        Assert.Equal(baseCursor + 4, changes.Max(c => c.ServerChangeId)); // Contiguos
+
+        // Un query desde un cursor intermedio (baseCursor + 2) no pierde ningún cambio posterior
+        var interChanges = await queryService.GetChangesAsync(baseCursor + 2);
+        Assert.Equal(2, interChanges.Changes.Count);
+        Assert.Equal(baseCursor + 4, interChanges.NextCursor);
+    }
 }

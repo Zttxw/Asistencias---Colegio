@@ -19,8 +19,10 @@ export async function syncOfflineData(apiBaseUrl: string = '/api'): Promise<{
   syncedCount: number;
   errorsCount: number;
   conflictsCount: number;
+  networkError: boolean;
 }> {
   const deviceId = await getDeviceId();
+  let networkError = false;
 
   // Paso 1: Enviar Sesiones pendientes primero (regla B2: evitar que asistencias queden en ERROR si la sesión tiene conflicto)
   const pendingSessions = await db.classSessions.where('syncState').equals('PENDING').toArray();
@@ -111,7 +113,7 @@ export async function syncOfflineData(apiBaseUrl: string = '/api'): Promise<{
       }
     } catch (err: unknown) {
       console.warn('Sync sesiones en vuelo falló:', err);
-      // Mantener en PENDING ante corte de red
+      networkError = true;
     }
   }
 
@@ -183,6 +185,7 @@ export async function syncOfflineData(apiBaseUrl: string = '/api'): Promise<{
       }
     } catch (err: unknown) {
       console.warn('Sync asistencias en vuelo falló:', err);
+      networkError = true;
     }
   }
 
@@ -196,5 +199,5 @@ export async function syncOfflineData(apiBaseUrl: string = '/api'): Promise<{
   const conflictsCount = (await db.classSessions.where('syncState').equals('CONFLICT').count()) +
                         (await db.attendanceRecords.where('syncState').equals('CONFLICT').count());
 
-  return { totalPending: pendingCount, syncedCount, errorsCount, conflictsCount };
+  return { totalPending: pendingCount, syncedCount, errorsCount, conflictsCount, networkError };
 }

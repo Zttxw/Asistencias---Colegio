@@ -63,3 +63,22 @@ Decisiones pequeñas tomadas durante la implementación. No modifican la arquite
 ## DEC-012 — PostgreSQL 17
 - **Fecha:** 2026-10-05
 - **Decisión:** imagen `postgres:17-alpine`, con volumen nombrado `pgdata` montado en `/var/lib/postgresql/data`.
+
+## DEC-013 — Protocolo de sincronización, regla 3b (chain_base_version) y persistencia
+- **Fecha:** 2026-10-06
+- **Contexto:** En escenarios de conectividad inestable, una tablet offline puede modificar un registro múltiples veces consecutivas (ej. Falta médica → Tardanza justificada). Si la primera modificación llega al servidor y se aplica, pero el ACK HTTP de vuelta se pierde por corte de red, la tablet conserva una `baseVersion` antigua. Cuando la segunda modificación llega al servidor, una verificación estricta de `item.BaseVersion == existing.Version` provocaría un falso conflicto (`conflict`), rechazando una edición legítima del mismo docente.
+- **Decisión:** Implementar y formalizar la Regla 3b mediante la tupla `(chain_base_version, device_id)`:
+  - **Campos:** `chain_base_version` (integer, NOT NULL, default 0) y `device_id` (uuid, nullable).
+  - **Tablas:** `class_sessions` y `attendance_records`.
+  - **Significado:**
+    - `chain_base_version`: Almacena la versión base con la que el cliente comenzó su cadena de modificaciones.
+    - `device_id`: Identifica unívocamente la tablet que produjo la última versión aceptada del registro.
+  - **Ciclo de vida:**
+    - *Establecimiento (INSERT):* Al crear el registro en el servidor, `chain_base_version = item.BaseVersion` (usualmente 0) y `device_id = request.DeviceId`.
+    - *Actualización regular (UPDATE con baseVersion == version):* Cuando llega una modificación normal, `chain_base_version = item.BaseVersion` y `device_id = request.DeviceId`.
+    - *Continuación de cadena (UPDATE bajo Regla 3b):* Si `item.BaseVersion < version`, pero `existing.DeviceId == request.DeviceId` y `item.BaseVersion == existing.ChainBaseVersion`, se acepta (`accepted`), se incrementa `existing.Version += 1` y se preserva `existing.ChainBaseVersion` para permitir continuaciones subsiguientes si la conexión sigue inestable.
+    - *Limpieza / Sobrescritura:* Se reemplaza naturalmente cuando cualquier cliente envía una modificación sincronizada con `baseVersion == existing.Version`.
+  - **Seguridad y prevención de conflictos:**
+    - La regla 3b **solo** aplica si `existing.DeviceId == request.DeviceId`.
+    - Si un dispositivo B envía una modificación con `baseVersion` antigua (`existing.DeviceId != request.DeviceId`), el servidor devuelve estrictamente `conflict` con el registro canónico actual (`current`), impidiendo cualquier sobrescritura de datos por dispositivos no sincronizados.
+

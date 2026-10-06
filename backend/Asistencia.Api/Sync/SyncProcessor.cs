@@ -472,8 +472,10 @@ public sealed class SyncProcessor(AppDbContext db, ChangeLogWriter changes)
         }
         else
         {
-            dev.LastSyncAt = now;
-            await db.SaveChangesAsync(ct);
+            // Actualizar last_sync_at directamente con SQL para no marcar la entidad como modificada
+            // en el ChangeTracker si el lote resulta ser solo duplicate o conflict
+            await db.Database.ExecuteSqlInterpolatedAsync(
+                $"UPDATE devices SET last_sync_at = {now}, updated_at = {now} WHERE id = {deviceId}", ct);
         }
     }
 

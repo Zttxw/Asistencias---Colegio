@@ -115,6 +115,7 @@ Reglas por ítem, dentro de una transacción:
 1. No existe el id → insertar version = 1 → accepted. Si choca con índice único → conflict con el registro existente. Para sesión, la tablet adopta el sessionId canónico en la sesión y sus asistencias pendientes y reintenta.
 2. Existe y data idéntico → duplicate (sin cambiar versión ni change_log).
 3. Existe y baseVersion == version → aplicar, version + 1, change_log → accepted.
+3b. Regla 3b (Continuación de cadena por ACK perdido / `chain_base_version`): Si `baseVersion < version`, pero el `deviceId` del request coincide con el `device_id` que produjo la versión anterior reconocida en el servidor Y `baseVersion == chain_base_version`, se acepta como continuación válida de la cadena de cambios del mismo dispositivo offline (`accepted`, version + 1, change_log). Si el `deviceId` difiere o no coincide `chain_base_version`, se aplica la regla 4 (`conflict`), impidiendo falsos conflictos del mismo dispositivo y evitando que un dispositivo B sobrescriba datos con versiones antiguas.
 4. Existe y baseVersion < version con datos distintos → conflict con current. No sobrescribir.
 5. Datos inválidos → rejected con mensaje.
 

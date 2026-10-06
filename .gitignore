@@ -9,3 +9,6 @@ obj/
 .vscode/
 *.swp
 *~
+test-results/
+playwright-report/
+node_modules/
