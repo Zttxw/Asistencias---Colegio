@@ -201,6 +201,7 @@ public sealed class SyncProcessor(AppDbContext db, ChangeLogWriter changes)
                 Version = 1,
                 DeviceId = deviceId,
                 ChainBaseVersion = item.BaseVersion,
+                LastDeviceRev = item.LocalRev > 0 ? item.LocalRev : 1,
                 ClientUpdatedAt = item.ClientUpdatedAt
             };
 
@@ -227,14 +228,31 @@ public sealed class SyncProcessor(AppDbContext db, ChangeLogWriter changes)
             };
         }
 
-        // Regla 3 & 3b (revisión I1): baseVersion == version actual O continuación de cadena del mismo dispositivo
-        var isChainContinuation = existing.DeviceId == deviceId && item.BaseVersion == existing.ChainBaseVersion;
+        var isSameDevice = existing.DeviceId == deviceId;
+        if (isSameDevice && item.LocalRev > 0 && item.LocalRev <= existing.LastDeviceRev)
+        {
+            // Reenvío viejo / reintento tardío del mismo dispositivo: nunca sobreescribir edición más reciente
+            return new SyncItemResult
+            {
+                Id = item.Id,
+                Status = SyncItemStatus.Duplicate,
+                ServerVersion = existing.Version
+            };
+        }
+
+        // Regla 3 & 3b (revisión I1 / DEC-013): baseVersion == version actual O continuación de cadena válida del mismo dispositivo
+        var isChainContinuation = isSameDevice && (
+            (item.LocalRev > 0 && item.LocalRev > existing.LastDeviceRev) ||
+            item.BaseVersion == existing.ChainBaseVersion
+        );
+
         if (item.BaseVersion == existing.Version || isChainContinuation)
         {
             existing.Status = sessionStatus;
             existing.CourseName = data.CourseName;
             existing.Version += 1;
             existing.DeviceId = deviceId;
+            existing.LastDeviceRev = item.LocalRev > 0 ? item.LocalRev : existing.LastDeviceRev + 1;
             if (!isChainContinuation)
             {
                 existing.ChainBaseVersion = item.BaseVersion;
@@ -328,6 +346,7 @@ public sealed class SyncProcessor(AppDbContext db, ChangeLogWriter changes)
                 Version = 1,
                 DeviceId = deviceId,
                 ChainBaseVersion = item.BaseVersion,
+                LastDeviceRev = item.LocalRev > 0 ? item.LocalRev : 1,
                 ClientUpdatedAt = item.ClientUpdatedAt
             };
 
@@ -353,8 +372,24 @@ public sealed class SyncProcessor(AppDbContext db, ChangeLogWriter changes)
             };
         }
 
-        // Regla 3 & 3b (revisión I1)
-        var isChainContinuation = existing.DeviceId == deviceId && item.BaseVersion == existing.ChainBaseVersion;
+        var isSameDevice = existing.DeviceId == deviceId;
+        if (isSameDevice && item.LocalRev > 0 && item.LocalRev <= existing.LastDeviceRev)
+        {
+            // Reenvío viejo / reintento tardío del mismo dispositivo: nunca sobreescribir edición más reciente
+            return new SyncItemResult
+            {
+                Id = item.Id,
+                Status = SyncItemStatus.Duplicate,
+                ServerVersion = existing.Version
+            };
+        }
+
+        // Regla 3 & 3b (revisión I1 / DEC-013): baseVersion == version actual O continuación de cadena válida del mismo dispositivo
+        var isChainContinuation = isSameDevice && (
+            (item.LocalRev > 0 && item.LocalRev > existing.LastDeviceRev) ||
+            item.BaseVersion == existing.ChainBaseVersion
+        );
+
         if (item.BaseVersion == existing.Version || isChainContinuation)
         {
             var prevStatus = existing.Status.ToString().ToUpperInvariant();
@@ -375,6 +410,7 @@ public sealed class SyncProcessor(AppDbContext db, ChangeLogWriter changes)
 
             existing.Version += 1;
             existing.DeviceId = deviceId;
+            existing.LastDeviceRev = item.LocalRev > 0 ? item.LocalRev : existing.LastDeviceRev + 1;
             if (!isChainContinuation)
             {
                 existing.ChainBaseVersion = item.BaseVersion;

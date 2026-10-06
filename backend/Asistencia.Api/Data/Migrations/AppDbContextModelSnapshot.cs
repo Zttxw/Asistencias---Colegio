@@ -92,6 +92,10 @@ namespace Asistencia.Api.Data.Migrations
                         .HasColumnType("boolean")
                         .HasColumnName("is_void");
 
+                    b.Property<int>("LastDeviceRev")
+                        .HasColumnType("integer")
+                        .HasColumnName("last_device_rev");
+
                     b.Property<string>("Note")
                         .HasMaxLength(500)
                         .HasColumnType("character varying(500)")
@@ -232,6 +236,10 @@ namespace Asistencia.Api.Data.Migrations
                     b.Property<Guid?>("DeviceId")
                         .HasColumnType("uuid")
                         .HasColumnName("device_id");
+
+                    b.Property<int>("LastDeviceRev")
+                        .HasColumnType("integer")
+                        .HasColumnName("last_device_rev");
 
                     b.Property<Guid>("SectionId")
                         .HasColumnType("uuid")

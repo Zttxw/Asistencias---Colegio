@@ -78,8 +78,8 @@ test.describe('Fase 2 — Pruebas Automatizadas Offline-First (E2E)', () => {
     expect(parseInt(totalRecords)).toBe(1);
   });
 
-  test('Escenario C: Cierre de pestaña/recarga durante estado pendiente y localRev protege cambios', async ({ context, page }) => {
-    // Limpiar registros previos para aislar el escenario
+  test('Escenario C: Cierre a mitad de sync (petición aplicada en servidor pero ACK cortado antes de llegar a la tablet)', async ({ context, page }) => {
+    // 1. Limpiar registros previos para aislar el escenario
     queryDb("DELETE FROM attendance_records;");
     await page.evaluate(async () => {
       await (window as any).__db.attendanceRecords.clear();
@@ -88,36 +88,52 @@ test.describe('Fase 2 — Pruebas Automatizadas Offline-First (E2E)', () => {
     await page.reload();
     await expect(page.getByTestId('student-name')).toBeVisible();
 
-    // Desconectar red
-    await context.setOffline(true);
+    // 2. Interceptar llamadas a POST /api/sync:
+    // El servidor procesa y aplica la petición (route.fetch()), pero abortamos la respuesta antes de que el ACK llegue a la tablet
+    let requestAppliedOnServer = false;
+    await page.route('**/api/sync', async (route) => {
+      if (route.request().method() === 'POST' && !requestAppliedOnServer) {
+        // Enviar al servidor real para que persista en PostgreSQL
+        const response = await route.fetch();
+        expect(response.status()).toBe(200);
+        requestAppliedOnServer = true;
+        // Cortar la conexión abruptamente antes de entregar el ACK al navegador
+        await route.abort('failed');
+      } else {
+        await route.continue();
+      }
+    });
 
-    // Cambiar a Tardanza
+    // 3. Modificar asistencia y guardar (se envía la petición pero el ACK se pierde en vuelo)
     await page.getByTestId('btn-status-late').click();
-    await page.getByTestId('input-note').fill('Tardanza corregida offline');
+    await page.getByTestId('input-note').fill('Tardanza con ACK cortado');
     await page.getByTestId('btn-save').click();
 
-    await expect(page.getByTestId('sync-indicator-pending')).toBeVisible();
+    // Debe mostrar error de sincronización o permanecer pendiente debido al corte del ACK
+    await expect(
+      page.locator('[data-testid="sync-indicator-error"], [data-testid="sync-indicator-pending"]')
+    ).toBeVisible({ timeout: 10000 });
+    expect(requestAppliedOnServer).toBe(true);
 
-    // Simular cierre de pestaña y reapertura:
+    // 4. Simular cierre de pestaña y reapertura
     await page.close();
-    await context.setOffline(false);
 
     const newPage = await context.newPage();
     await newPage.goto('/');
 
-    // Debe conservar el estado pendiente tras reabrir desde IndexedDB
+    // Al reabrir, el registro permanece en IndexedDB con estado PENDING
     await expect(newPage.getByTestId('sync-indicator-pending')).toBeVisible();
 
-    // Sincronizar
+    // 5. La tablet reintenta la sincronización con conexión restablecida (ejercita regla 3b / reenvío de ACK perdido)
     await newPage.getByTestId('btn-retry').click();
     await expect(newPage.getByTestId('sync-indicator-synced')).toBeVisible({ timeout: 10000 });
 
-    // Validar que en PostgreSQL la asistencia se actualizó a LATE sin duplicar fila
-    const updatedStatus = queryDb("SELECT status FROM attendance_records WHERE note = 'Tardanza corregida offline';");
-    expect(updatedStatus).toBe('LATE');
-
-    const totalForStudent = queryDb("SELECT count(*) FROM attendance_records WHERE note = 'Tardanza corregida offline';");
+    // 6. Validar que en PostgreSQL la asistencia quedó guardada exactamente 1 vez con status LATE
+    const totalForStudent = queryDb("SELECT count(*) FROM attendance_records WHERE note = 'Tardanza con ACK cortado';");
     expect(parseInt(totalForStudent)).toBe(1);
+
+    const updatedStatus = queryDb("SELECT status FROM attendance_records WHERE note = 'Tardanza con ACK cortado';");
+    expect(updatedStatus).toBe('LATE');
   });
 
   test('Escenario D: API detenida mantiene registros en PENDING/Error y recupera al reiniciar', async ({ page }) => {
@@ -160,7 +176,7 @@ test.describe('Fase 2 — Pruebas Automatizadas Offline-First (E2E)', () => {
     expect(status).toBe('EXCUSED');
   });
 
-  test('Escenario E: Reloj del navegador desfasado años no altera la autoridad del servidor', async ({ page }) => {
+  test('Escenario E: Reloj del navegador desfasado en pasado (2001) o futuro (2045) no altera la autoridad del servidor', async ({ page }) => {
     // Limpiar registros previos para aislar el escenario
     queryDb("DELETE FROM attendance_records;");
     await page.evaluate(async () => {
@@ -170,26 +186,44 @@ test.describe('Fase 2 — Pruebas Automatizadas Offline-First (E2E)', () => {
     await page.reload();
     await expect(page.getByTestId('student-name')).toBeVisible();
 
-    // Modificar toISOString en la página para simular que el cliente envía marcas temporales de 2045
+    // 1. Probar reloj atrasado en el pasado (año 2001)
+    await page.evaluate(() => {
+      Date.prototype.toISOString = function () {
+        return '2001-04-12T08:15:00.000Z';
+      };
+    });
+
+    await page.getByTestId('btn-status-present').click();
+    await page.getByTestId('input-note').fill('Prueba reloj pasado 2001');
+    await page.getByTestId('btn-save').click();
+
+    await expect(page.getByTestId('sync-indicator-synced')).toBeVisible({ timeout: 10000 });
+
+    // Verificar en PostgreSQL: el servidor asignó created_at y updated_at en 2026 (su hora del servidor), NO 2001
+    const yearPast = queryDb("SELECT EXTRACT(YEAR FROM updated_at) FROM attendance_records WHERE note = 'Prueba reloj pasado 2001';");
+    expect(parseInt(yearPast)).toBe(2026);
+
+    // Verificar que en attendance_records se preservó el clientUpdatedAt en 2001 solo como metadato
+    const clientYearPast = queryDb("SELECT EXTRACT(YEAR FROM client_updated_at) FROM attendance_records WHERE note = 'Prueba reloj pasado 2001';");
+    expect(parseInt(clientYearPast)).toBe(2001);
+
+    // 2. Probar reloj adelantado en el futuro (año 2045)
     await page.evaluate(() => {
       Date.prototype.toISOString = function () {
         return '2045-10-06T15:30:00.000Z';
       };
     });
 
-    await page.getByTestId('btn-status-present').click();
-    await page.getByTestId('input-note').fill('Prueba reloj desfasado');
+    await page.getByTestId('btn-status-late').click();
+    await page.getByTestId('input-note').fill('Prueba reloj futuro 2045');
     await page.getByTestId('btn-save').click();
 
-    // El guardado online ejecuta sync automáticamente
     await expect(page.getByTestId('sync-indicator-synced')).toBeVisible({ timeout: 10000 });
 
-    // Verificar en PostgreSQL: el servidor asignó created_at y updated_at en 2026 (su hora del servidor), NO 2045
-    const year = queryDb("SELECT EXTRACT(YEAR FROM updated_at) FROM attendance_records WHERE note = 'Prueba reloj desfasado';");
-    expect(parseInt(year)).toBe(2026);
+    const yearFuture = queryDb("SELECT EXTRACT(YEAR FROM updated_at) FROM attendance_records WHERE note = 'Prueba reloj futuro 2045';");
+    expect(parseInt(yearFuture)).toBe(2026);
 
-    // Verificar que en attendance_records se preservó el clientUpdatedAt reportado por el cliente en 2045 como metadato
-    const clientYear = queryDb("SELECT EXTRACT(YEAR FROM client_updated_at) FROM attendance_records WHERE note = 'Prueba reloj desfasado';");
-    expect(parseInt(clientYear)).toBe(2045);
+    const clientYearFuture = queryDb("SELECT EXTRACT(YEAR FROM client_updated_at) FROM attendance_records WHERE note = 'Prueba reloj futuro 2045';");
+    expect(parseInt(clientYearFuture)).toBe(2045);
   });
 });

@@ -32,6 +32,7 @@ export async function syncOfflineData(apiBaseUrl: string = '/api'): Promise<{
       entity: 'class_session',
       id: s.id,
       baseVersion: s.baseVersion,
+      localRev: s.localRev,
       clientUpdatedAt: s.clientUpdatedAt,
       data: {
         sectionId: s.sectionId,
@@ -133,6 +134,7 @@ export async function syncOfflineData(apiBaseUrl: string = '/api'): Promise<{
       entity: 'attendance_record',
       id: a.id,
       baseVersion: a.baseVersion,
+      localRev: a.localRev,
       clientUpdatedAt: a.clientUpdatedAt,
       data: {
         sessionId: a.sessionId,

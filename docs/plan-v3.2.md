@@ -96,7 +96,7 @@ Request:
 {
   "deviceId": "uuid",
   "items": [
-    { "entity": "class_session | attendance_record", "id": "uuid", "baseVersion": 0,
+    { "entity": "class_session | attendance_record", "id": "uuid", "baseVersion": 0, "localRev": 1,
       "clientUpdatedAt": "2026-10-05T08:03:00-05:00", "data": { } }
   ]
 }
@@ -112,10 +112,14 @@ Response (un resultado por ítem, mismo orden):
 }
 ```
 Reglas por ítem, dentro de una transacción:
-1. No existe el id → insertar version = 1 → accepted. Si choca con índice único → conflict con el registro existente. Para sesión, la tablet adopta el sessionId canónico en la sesión y sus asistencias pendientes y reintenta.
+1. No existe el id → insertar version = 1, last_device_rev = localRev → accepted. Si choca con índice único → conflict con el registro existente. Para sesión, la tablet adopta el sessionId canónico en la sesión y sus asistencias pendientes y reintenta.
 2. Existe y data idéntico → duplicate (sin cambiar versión ni change_log).
-3. Existe y baseVersion == version → aplicar, version + 1, change_log → accepted.
-3b. Regla 3b (Continuación de cadena por ACK perdido / `chain_base_version`): Si `baseVersion < version`, pero el `deviceId` del request coincide con el `device_id` que produjo la versión anterior reconocida en el servidor Y `baseVersion == chain_base_version`, se acepta como continuación válida de la cadena de cambios del mismo dispositivo offline (`accepted`, version + 1, change_log). Si el `deviceId` difiere o no coincide `chain_base_version`, se aplica la regla 4 (`conflict`), impidiendo falsos conflictos del mismo dispositivo y evitando que un dispositivo B sobrescriba datos con versiones antiguas.
+3. Existe y baseVersion == version → aplicar, version + 1, last_device_rev = localRev, change_log → accepted.
+3b. Regla 3b (Continuación de cadena por ACK perdido y protección ante reenvío tardío vía `localRev`):
+- Si `deviceId` coincide con el último dispositivo del registro:
+  - Si `localRev <= last_device_rev`: es un reenvío tardío o desfasado de un paquete en vuelo. Responde `duplicate` sin modificar el registro ni la versión (evita que una edición vieja pise una nueva).
+  - Si `localRev > last_device_rev`: es una edición más reciente de la misma tablet tras un ACK perdido. Se acepta (`accepted`, version + 1, last_device_rev = localRev, change_log).
+- Si `deviceId` difiere y `baseVersion < version`: responde `conflict` con current (regla 4). Un dispositivo ajeno nunca sobrescribe con versiones desactualizadas.
 4. Existe y baseVersion < version con datos distintos → conflict con current. No sobrescribir.
 5. Datos inválidos → rejected con mensaje.
 

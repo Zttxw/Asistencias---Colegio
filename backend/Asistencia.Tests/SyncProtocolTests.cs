@@ -532,6 +532,110 @@ public sealed class SyncProtocolTests(PostgresFixture fx) : IClassFixture<Postgr
     }
 
     [Fact]
+    public async Task Push_DelayedRetryWithLowerLocalRev_ReturnsDuplicate_DoesNotOverwriteNewerEdit()
+    {
+        // Caso de revisión: Reenvío tardío desfasado en red.
+        // Tablet A aplica edición 1 (localRev = 1, status = PRESENT) -> versión 1
+        // Tablet A aplica edición 2 (localRev = 2, status = LATE) -> versión 2
+        // Llega tarde el paquete de la edición 1 (localRev = 1) debido a reintento en vuelo desfasado.
+        // Debe responder duplicate y NUNCA pisar la edición 2 más reciente.
+        await using var db = fx.CreateContext();
+        var data = await BaseData.CreateAsync(db);
+        var proc = NewProcessor(db);
+
+        var sessionId = Guid.NewGuid();
+        var attId = Guid.NewGuid();
+
+        // 1. Crear sesión y asistencia inicial (localRev = 1)
+        var push1 = await proc.ProcessPushAsync(new SyncPushRequest
+        {
+            DeviceId = Dev1,
+            Items =
+            [
+                new SyncPushItem
+                {
+                    Entity = EntityNames.ClassSession,
+                    Id = sessionId,
+                    BaseVersion = 0,
+                    LocalRev = 1,
+                    Data = JsonSerializer.SerializeToElement(new { sectionId = data.SectionId, teacherId = data.TeacherId, date = Day.AddDays(15), slot = "JORNADA", status = "TAKEN" })
+                },
+                new SyncPushItem
+                {
+                    Entity = EntityNames.AttendanceRecord,
+                    Id = attId,
+                    BaseVersion = 0,
+                    LocalRev = 1,
+                    Data = JsonSerializer.SerializeToElement(new { sessionId = sessionId, studentId = data.StudentAId, status = "PRESENT" })
+                }
+            ]
+        }, data.UserId);
+
+        Assert.All(push1.Results, r => Assert.Equal(SyncItemStatus.Accepted, r.Status));
+        Assert.Equal(1, push1.Results[1].ServerVersion);
+
+        // 2. Tablet edita a LATE (localRev = 2). Supongamos que el ACK anterior se perdió o la tablet continuó su cadena (baseVersion = 0)
+        var push2 = await proc.ProcessPushAsync(new SyncPushRequest
+        {
+            DeviceId = Dev1,
+            Items =
+            [
+                new SyncPushItem
+                {
+                    Entity = EntityNames.AttendanceRecord,
+                    Id = attId,
+                    BaseVersion = 0,
+                    LocalRev = 2,
+                    Data = JsonSerializer.SerializeToElement(new { sessionId = sessionId, studentId = data.StudentAId, status = "LATE" })
+                }
+            ]
+        }, data.UserId);
+
+        Assert.Single(push2.Results);
+        Assert.Equal(SyncItemStatus.Accepted, push2.Results[0].Status);
+        Assert.Equal(2, push2.Results[0].ServerVersion);
+
+        // El registro actual en el servidor es LATE con versión 2 y LastDeviceRev = 2
+        var current = await db.AttendanceRecords.AsNoTracking().FirstAsync(r => r.Id == attId);
+        Assert.Equal(AttendanceStatus.Late, current.Status);
+        Assert.Equal(2, current.Version);
+        Assert.Equal(2, current.LastDeviceRev);
+
+        var cursorBeforeDelayed = (await db.SyncCursor.FindAsync(1))!.Value;
+
+        // 3. Llega tarde el paquete de la edición 1 (localRev = 1, status = PRESENT)
+        var pushDelayed = await proc.ProcessPushAsync(new SyncPushRequest
+        {
+            DeviceId = Dev1,
+            Items =
+            [
+                new SyncPushItem
+                {
+                    Entity = EntityNames.AttendanceRecord,
+                    Id = attId,
+                    BaseVersion = 0,
+                    LocalRev = 1, // Menor que LastDeviceRev (2)
+                    Data = JsonSerializer.SerializeToElement(new { sessionId = sessionId, studentId = data.StudentAId, status = "PRESENT" })
+                }
+            ]
+        }, data.UserId);
+
+        // Debe responder duplicate
+        Assert.Single(pushDelayed.Results);
+        Assert.Equal(SyncItemStatus.Duplicate, pushDelayed.Results[0].Status);
+        Assert.Equal(2, pushDelayed.Results[0].ServerVersion);
+
+        // Verificar que en la base de datos sigue siendo LATE y no se modificó la versión ni se incrementó el cursor de change_log
+        var afterDelayed = await db.AttendanceRecords.AsNoTracking().FirstAsync(r => r.Id == attId);
+        Assert.Equal(AttendanceStatus.Late, afterDelayed.Status);
+        Assert.Equal(2, afterDelayed.Version);
+        Assert.Equal(2, afterDelayed.LastDeviceRev);
+
+        var cursorAfterDelayed = (await db.SyncCursor.FindAsync(1))!.Value;
+        Assert.Equal(cursorBeforeDelayed, cursorAfterDelayed);
+    }
+
+    [Fact]
     public async Task Push_SameDataDifferentMetadata_ReturnsDuplicate()
     {
         // 2.2: Enviar exactamente el mismo contenido lógico pero cambiar clientUpdatedAt y baseVersion

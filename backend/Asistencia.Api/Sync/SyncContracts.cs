@@ -23,6 +23,9 @@ public sealed class SyncPushItem
     [JsonPropertyName("baseVersion")]
     public int BaseVersion { get; set; }
 
+    [JsonPropertyName("localRev")]
+    public int LocalRev { get; set; } = 0;
+
     [JsonPropertyName("clientUpdatedAt")]
     public DateTimeOffset? ClientUpdatedAt { get; set; }
 

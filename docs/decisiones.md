@@ -82,3 +82,17 @@ Decisiones pequeñas tomadas durante la implementación. No modifican la arquite
     - La regla 3b **solo** aplica si `existing.DeviceId == request.DeviceId`.
     - Si un dispositivo B envía una modificación con `baseVersion` antigua (`existing.DeviceId != request.DeviceId`), el servidor devuelve estrictamente `conflict` con el registro canónico actual (`current`), impidiendo cualquier sobrescritura de datos por dispositivos no sincronizados.
 
+## DEC-014 — Protección contra reenvíos tardíos y fortalecimiento de la Regla 3b vía localRev / last_device_rev
+- **Fecha:** 2026-10-06
+- **Contexto:** En redes intermitentes, si una tablet envía una edición 1 (cuyo ACK se pierde) y luego realiza y sincroniza una edición 2, un paquete rezagado en vuelo de la edición 1 que llegue después traería el mismo `deviceId` y `baseVersion`. Si solo se evaluara `chain_base_version`, la edición 1 vieja podría aplicarse sobre la edición 2 más reciente, sobrescribiéndola en silencio.
+- **Decisión:** Utilizar el contador de secuencia local `localRev` que la tablet ya incrementa en cada edición, enviándolo en cada ítem de `POST /sync`, y persistir `last_device_rev` en el servidor:
+  - **Campos:** `last_device_rev` (integer NOT NULL DEFAULT 0) en `class_sessions` y `attendance_records`.
+  - **Lógica aplicada en SyncProcessor:**
+    - Si `existing.DeviceId == request.DeviceId`:
+      - Si `item.LocalRev <= existing.LastDeviceRev`: se detecta como reenvío tardío o paquete desfasado en red. Se responde `duplicate` sin tocar el registro, versión ni `change_log`.
+      - Si `item.LocalRev > existing.LastDeviceRev`: es una edición estrictamente más reciente. Se acepta (`accepted`), actualiza `last_device_rev = item.LocalRev`, incrementa `version += 1` y genera `change_log`.
+    - Si `existing.DeviceId != request.DeviceId`:
+      - Si `item.BaseVersion < existing.Version`: responde `conflict` con `current` (dispositivo ajeno desactualizado).
+  - **Resultado:** Elimina el riesgo de sobrescrituras fuera de orden y preserva el orden causal de las modificaciones del docente.
+
+

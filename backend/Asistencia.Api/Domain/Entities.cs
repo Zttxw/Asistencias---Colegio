@@ -153,6 +153,8 @@ public interface ISyncEntity : ITimestamped
     Guid? DeviceId { get; set; }
     /// <summary>baseVersion desde la que empezó la cadena de escrituras del último dispositivo (revisión I1).</summary>
     int ChainBaseVersion { get; set; }
+    /// <summary>Último número de secuencia localRev aplicado por el dispositivo, para detectar reenvíos viejos y evitar sobreescritura.</summary>
+    int LastDeviceRev { get; set; }
     /// <summary>Solo informativo: nunca decide qué dato es más nuevo.</summary>
     DateTimeOffset? ClientUpdatedAt { get; set; }
 }
@@ -174,6 +176,7 @@ public class ClassSession : ISyncEntity
     public Guid? DeviceId { get; set; }
     public Device? Device { get; set; }
     public int ChainBaseVersion { get; set; }
+    public int LastDeviceRev { get; set; }
     public DateTimeOffset? ClientUpdatedAt { get; set; }
     public DateTime? VoidedAt { get; set; }
     public Guid? VoidedBy { get; set; }
@@ -197,6 +200,7 @@ public class AttendanceRecord : ISyncEntity
     public Guid? DeviceId { get; set; }
     public Device? Device { get; set; }
     public int ChainBaseVersion { get; set; }
+    public int LastDeviceRev { get; set; }
     public DateTimeOffset? ClientUpdatedAt { get; set; }
     public bool IsVoid { get; set; }
     public DateTime? VoidedAt { get; set; }
