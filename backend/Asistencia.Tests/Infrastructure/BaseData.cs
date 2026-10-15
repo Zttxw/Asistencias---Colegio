@@ -29,7 +29,28 @@ public sealed record BaseData(Guid InstitutionId, Guid UserId, Guid TeacherId, G
         var a = new Student { Id = Guid.NewGuid(), InstitutionId = inst.Id, Code = $"T{Guid.NewGuid():N}"[..12], FullName = "Alumno A" };
         var b = new Student { Id = Guid.NewGuid(), InstitutionId = inst.Id, Code = $"T{Guid.NewGuid():N}"[..12], FullName = "Alumno B" };
 
-        db.AddRange(inst, user, teacher, year, section, a, b);
+        var link = new SectionTeacher { Id = Guid.NewGuid(), SectionId = section.Id, TeacherId = teacher.Id };
+
+        var enrA = new Enrollment
+        {
+            Id = Guid.NewGuid(),
+            SectionId = section.Id,
+            StudentId = a.Id,
+            AcademicYearId = year.Id,
+            Status = EnrollmentStatus.Active,
+            StartDate = new DateOnly(2026, 3, 1)
+        };
+        var enrB = new Enrollment
+        {
+            Id = Guid.NewGuid(),
+            SectionId = section.Id,
+            StudentId = b.Id,
+            AcademicYearId = year.Id,
+            Status = EnrollmentStatus.Active,
+            StartDate = new DateOnly(2026, 3, 1)
+        };
+
+        db.AddRange(inst, user, teacher, year, section, link, a, b, enrA, enrB);
         await db.SaveChangesAsync();
         return new BaseData(inst.Id, user.Id, teacher.Id, year.Id, section.Id, a.Id, b.Id);
     }

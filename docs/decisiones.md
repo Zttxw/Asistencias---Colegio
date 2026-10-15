@@ -95,4 +95,113 @@ Decisiones pequeñas tomadas durante la implementación. No modifican la arquite
       - Si `item.BaseVersion < existing.Version`: responde `conflict` con `current` (dispositivo ajeno desactualizado).
   - **Resultado:** Elimina el riesgo de sobrescrituras fuera de orden y preserva el orden causal de las modificaciones del docente.
 
+## DEC-015 — Orden de Regla 3b ante datos distintos con localRev <= last_device_rev y retiro de chain_base_version
+- **Fecha:** 2026-10-06
+- **Contexto:** Si un dispositivo envía un ítem con datos distintos pero `localRev <= last_device_rev` (por ejemplo, reinicio de contador a 1 o paquete rezagado desfasado), responder `duplicate` provocaría que la tablet interprete la respuesta como confirmada y muestre 🟢 Sincronizado, produciendo pérdida silenciosa de ediciones en el servidor.
+- **Decisión:**
+  1. **Orden estricto de la regla en servidor:**
+     - Primero se evalúa si los datos son idénticos (`IsDataEqual`). Si coinciden -> `duplicate` (idempotencia pura, sin tocar versión ni change log).
+     - Si los datos son distintos y `existing.DeviceId == request.DeviceId` con `item.LocalRev <= existing.LastDeviceRev`: se responde `conflict` con `current` (no `duplicate`).
+     - Si `existing.DeviceId == request.DeviceId` y `item.LocalRev > existing.LastDeviceRev`: es una edición más reciente tras ACK perdido (Regla 3b). Se acepta (`accepted`, `version += 1`, `last_device_rev = localRev`, `change_log`).
+  2. **Almacenamiento conjunto en frontend:**
+     - `deviceId` y `localRev` residen en el mismo almacén (IndexedDB / Dexie: `db.metadata` y tablas de entidades). Si el usuario borra datos del sitio, ambos se borran juntos y la tablet genera un nuevo `deviceId` (UUID fresco).
+     - La tablet ignora respuestas rezagadas de `conflict`/`error` si `local.localRev !== snapshot._localRev` (hay edición local más reciente en vuelo). Si el contador se reinició, `local.localRev === snapshot._localRev` y el conflicto se hace visible en la UI.
+  3. **Retiro de `chain_base_version` de las reglas:**
+     - La regla 3b se evalúa exclusivamente mediante `isSameDevice && item.LocalRev > existing.LastDeviceRev`. `chain_base_version` no interviene en ninguna regla ni condición de sincronización.
+  4. **Dispositivo intercalado garantizado:**
+     - Si A edita, B edita (`existing.DeviceId = B`) y A reenvía con `localRev` mayor pero `baseVersion` antigua: como `existing.DeviceId != A`, no es continuación de cadena y responde `conflict` con `current` (edición de B).
 
+## DEC-016 — Estrategia de importación de padrón, CLI administrativa, código secuencial y privacidad
+- **Fecha:** 2026-10-06
+- **Contexto:** La integración del padrón de alumnos desde el Excel requiere garantizar la estabilidad de las identidades de los menores, prevenir pérdidas o corrupciones de datos en base de datos, detectar anomalías de formato o posibles homónimos, evitar endpoints públicos no autenticados, y proteger la privacidad de los menores según la normativa vigente (Ley 29733).
+- **Decisión:**
+  1. **Herramienta administrativa CLI (Sin endpoints HTTP públicos):**
+     - Se elimina cualquier endpoint público como `POST /api/roster/dry-run`.
+     - El análisis y la importación son operaciones puramente administrativas invocadas por CLI:
+       `cat padron.xlsx | docker compose exec -T api dotnet /app/Asistencia.Api.dll roster dry-run -`
+       `docker compose exec api dotnet /app/Asistencia.Api.dll roster import <archivo.xlsx>`
+  2. **Identidad del alumno desacoplada (`Code` secuencial, no hash):**
+     - Se rechaza derivar el código del hash del nombre (`STU-{SHA256}`), ya que mezclaría identidad con datos personales mutables (ej. corrección ortográfica de apellido cambiaría el código).
+     - El código se genera secuencialmente por institución (`STU-0001`, `STU-0002`...) y jamás se recalcula a partir del nombre.
+  3. **Tres estados de resolución del importador (`NEW`, `MATCHED`, `AMBIGUOUS`):**
+     - `NEW`: nuevo alumno registrado; se le asigna el siguiente código correlativo disponible.
+     - `MATCHED`: alumno existente reconocido por nombre normalizado en la sección; conserva su `Id` y `Code` intactos.
+     - `AMBIGUOUS`: duplicados o posibles homónimos; detiene la importación con rollback y emite alerta para revisión humana.
+  4. **Protección contra borrados accidentales (Sin hard deletes):**
+     - Si un alumno ya no figura en un nuevo Excel, **nunca se elimina de PostgreSQL**. Se conserva con estado activo para no romper el histórico de asistencia de sesiones previas. El importador emite una advertencia informativa.
+  5. **Integración con ChangeLogWriter y sincronización:**
+     - Toda sección, alumno y matrícula creada por el importador se registra en `change_log` mediante `ChangeLogWriter` dentro de una transacción. `GET /sync/changes` entrega inmediatamente los alumnos a la tablet.
+  6. **Privacidad estricta y pruebas sintéticas (Ley 29733):**
+     - Los reportes, logs y advertencias solo refieren ubicación física (ej. `Hoja 5C, Fila 11`), sin exponer nombres reales de menores.
+     - El Excel real nunca se comitea (`.gitignore` incluye `*.xlsx`, `*.xls`). Las pruebas unitarias y de integración son 100% sintéticas con nombres ficticios.
+
+## DEC-017 — Autorización de subida/bajada, rol Auxiliar, control SEED_DEMO, aislamiento de PILOT y avance paralelo a Fase 3
+- **Fecha:** 2026-10-06
+- **Contexto:** Al transicionar hacia la Fase 3, se requiere blindar la seguridad de escritura y lectura en la API sin modificar la lógica congelada de sincronización (`localRev` / `last_device_rev`), evitar la siembra accidental de datos ficticios en producción, aislar los entornos DEV y PILOT, y formalizar el avance en paralelo con la prueba física pendiente del Criterio 9.
+- **Decisión:**
+  1. **Autorización estricta en SUBIDA (`POST /api/sync`):**
+     - **Docente (`TEACHER`):** Solo puede insertar o modificar `class_sessions` y `attendance_records` de secciones asignadas en `SectionTeachers`. Se valida tanto `class_session.section_id` como la relación indirecta `attendance_record -> class_session -> section`. Cualquier intento de inyectar UUIDs ajenos retorna `rejected` con mensaje explicativo, sin alterar entidades, versiones, `change_log` ni `sync_cursor`.
+     - **Auxiliar (`AUXILIARY`):** Rol estrictamente de solo lectura operativa. Cualquier intento de ejecutar `POST /api/sync` es rechazado de inmediato (`rejected` / HTTP 403 Forbidden) sin modificar la base de datos.
+  2. **Filtrado de padrón en BAJADA (`GET /api/sync/changes`):**
+     - El servidor es la única autoridad de autorización.
+     - Un docente solo descarga sus secciones asignadas, sus alumnos matriculados, sus sesiones y sus asistencias. No se confía en ningún parámetro del frontend.
+     - Para evitar bloqueos o bucles infinitos en el cliente, `nextCursor` siempre avanza hasta el máximo `server_change_id` de la página consultada, omitiendo del payload los registros no autorizados.
+     - El rol `AUXILIARY` recibe todas las secciones y registros de la institución, permitiéndole generar el consolidado de asistencia general del colegio a las 9:00 AM.
+  3. **Control estricto de semillas con `SEED_DEMO`:**
+     - La siembra de demostración (30 alumnos ficticios) NO se ejecuta automáticamente.
+     - Solo se activa cuando `SEED_DEMO=true` está presente de forma explícita. Por defecto (`SEED_DEMO=false` o ausencia), el sistema arranca con 0 alumnos demo, 0 secciones demo y 0 entradas en `change_log`.
+  4. **Avance en paralelo hacia Fase 3 y prerrequisito de Criterio Físico 9:**
+     - Se autoriza avanzar en el desarrollo de la Fase 3 (Login, UI de asistencia y reportes) en paralelo con la validación de infraestructura del Criterio 9 (tablet física).
+     - **Condición obligatoria:** El Criterio Físico 9 debe estar formalmente probado y aprobado antes de la Fase 4 y antes de iniciar el piloto real con alumnos reales.
+  5. **Protección y separación estricta de DEV y PILOT:**
+     - Los entornos DEV y PILOT utilizan bases de datos y volúmenes Docker completamente independientes.
+     - Queda terminantemente **PROHIBIDO** ejecutar `docker compose down -v` sobre el entorno de PILOT.
+     - Todo proceso de importación en PILOT debe estar precedido por un respaldo mediante `pg_dump` y verificación de restauración en entorno secundario.
+  6. **Autenticación Fase 3 (Login y JWT):**
+     - Implementado endpoint `POST /api/auth/login` con soporte para roles `TEACHER`, `AUXILIARY` y `ADMIN`.
+     - Contraseñas almacenadas exclusivamente con PBKDF2 (`IPasswordHasher<User>`).
+     - Tokens JWT con claims de identidad (`sub`), rol (`role`), nombre y `institution_id`.
+     - CORS restringido al frontend (`http://localhost:5173`, `http://127.0.0.1:5173`).
+
+
+## DEC-018 — Endurecimiento de Seguridad, Autorización, Aislamiento PILOT y Manejo de Errores de Sync
+- **Fecha:** 2026-10-06
+- **Contexto:** Antes de desplegar el flujo completo de asistencia de Fase 3 en la tablet y permitir la carga de padrones reales, se requiere cerrar los 16 puntos de verificación de seguridad, autorización e infraestructura, manteniendo el algoritmo central de sincronización (`localRev` / `last_device_rev`) completamente congelado.
+- **Decisión:**
+  1. **Resolución de sección de asistencia desde el servidor:**
+     - La sección de un `attendance_record` se resuelve exclusivamente a través de la relación persistida `attendance_record -> session_id -> class_session -> section_id`.
+     - Si el payload del cliente incluye un `sectionId` que discrepa con la sesión en el servidor, o si el docente autenticado no está asignado a la sección de la sesión, el registro se rechaza de inmediato (`rejected`).
+  2. **Validación obligatoria de matrícula activa:**
+     - Antes de aceptar cualquier `attendance_record`, el servidor verifica que el alumno cuente con un registro `Enrollment` con estado `Active` en la sección correspondiente a la sesión.
+     - Alumnos matriculados en otra sección o sin matrícula son rechazados (`rejected`) sin modificar la sesión, registros de asistencia, versiones ni `change_log`.
+  3. **Inmutabilidad y protección de `teacher_id` en sesiones:**
+     - Un docente autenticado no puede crear una sesión asignada a otro docente ni modificar una sesión existente para cambiar su `teacher_id`.
+     - El servidor es la autoridad de identidad y asigna el docente a partir de las credenciales autenticadas y las asignaciones de `SectionTeachers`.
+  4. **Gestión de usuarios reales sin SEED_DEMO:**
+     - Implementado comando CLI `dotnet /app/Asistencia.Api.dll user create` que solicita interactivamente usuario, nombre completo, rol (`TEACHER`, `AUXILIARY`, `ADMIN`) y contraseña con enmascaramiento en consola.
+     - Contraseñas procesadas mediante PBKDF2; prohibido colocar contraseñas en código, commits o variables compartidas.
+  5. **Obligatoriedad de `JWT_SECRET` fuera de desarrollo:**
+     - Validación estricta en el arranque del servidor (`JwtTokenService.ValidateJwtSecret`): en entornos no-Development, la aplicación aborta inmediatamente si `JWT_SECRET` no está configurado, mide menos de 32 caracteres o coincide con valores por defecto inseguros (`secret123`, `development-secret`, `changeme`).
+  6. **Resiliencia ante JWT expirado durante `POST /api/sync`:**
+     - Si la tablet envía una solicitud de sincronización con un JWT expirado o inválido, el servidor responde HTTP 401 Unauthorized.
+     - El cliente preserva intactos todos los registros en IndexedDB con estado `PENDING` (nunca se convierten a `ERROR` ni se eliminan).
+     - La interfaz muestra una advertencia recuperable: *"Sesión expirada. Inicia sesión nuevamente para sincronizar."*
+     - Al ingresar credenciales y renovar el token, el reintento sincroniza exitosamente a `SYNCED`.
+  7. **Diferenciación estricta de errores de sincronización:**
+     - HTTP 401: Sesión expirada -> estado `PENDING`, solicita nuevo login.
+     - Errores de red / offline: estado `PENDING`, reintento automático al restablecer conexión.
+     - HTTP 5xx: Fallo de servidor -> estado `PENDING`, reintento posterior.
+     - Conflictos de datos/concurrencia: estado `CONFLICT`.
+     - Rechazos por datos/autorización: estado `ERROR`.
+  8. **Protección contra ataques de fuerza bruta en login:**
+     - Implementado `LoginLockoutTracker`: tras 5 intentos fallidos consecutivos para un usuario, la cuenta entra en bloqueo temporal durante 5 minutos (HTTP 429 Too Many Requests). Un login exitoso restablece el contador.
+  9. **Estado de las preguntas de Fase 0:**
+     - Las preguntas sobre jornada vs. hora, celdas vacías en Excel y requerimientos específicos del auxiliar a las 9:00 AM se mantienen formalmente como **PROVISIONALES** hasta recibir confirmación explícita del docente.
+  10. **Aislamiento absoluto de PILOT:**
+      - Creado `docker-compose.pilot.yml` con volumen dedicado `asistencia_pgdata_pilot`, base `asistencia_pilot`, puertos diferenciados (5433/5081), `SEED_DEMO=false` y `ASPNETCORE_ENVIRONMENT=Production`.
+      - Documentada la prohibición terminante de ejecutar `docker compose down -v` sobre PILOT.
+  11. **Scripts reproducibles de backup y restauración:**
+      - `scripts/backup-pilot.sh`: ejecuta `pg_dump -Fc`, genera archivo con timestamp en `backups/` y valida existencia y tamaño > 0 bytes.
+      - `scripts/restore-test.sh`: ejecuta `pg_restore` sobre base temporal de prueba y verifica integridad de tablas y cursores. Probado exitosamente.
+  12. **Bloqueo de importación real de 91 alumnos:**
+      - La importación real de padrón permanece bloqueada hasta completar los prerrequisitos institucionales y de infraestructura.

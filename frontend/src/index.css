@@ -1,111 +1,395 @@
 :root {
-  --text: #6b6375;
-  --text-h: #08060d;
-  --bg: #fff;
-  --border: #e5e4e7;
-  --code-bg: #f4f3ec;
-  --accent: #aa3bff;
-  --accent-bg: rgba(170, 59, 255, 0.1);
-  --accent-border: rgba(170, 59, 255, 0.5);
-  --social-bg: rgba(244, 243, 236, 0.5);
-  --shadow:
-    rgba(0, 0, 0, 0.1) 0 10px 15px -3px, rgba(0, 0, 0, 0.05) 0 4px 6px -2px;
+  --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  
+  /* Paleta Institucional Estricta */
+  --c-dark: #11120D;
+  --c-stone: #565449;
+  --c-sand: #D8CFBC;
+  --c-white: #FFFFFF;
 
-  --sans: system-ui, 'Segoe UI', Roboto, sans-serif;
-  --heading: system-ui, 'Segoe UI', Roboto, sans-serif;
-  --mono: ui-monospace, Consolas, monospace;
-
-  font: 18px/145% var(--sans);
-  letter-spacing: 0.18px;
-  color-scheme: light dark;
-  color: var(--text);
-  background: var(--bg);
-  font-synthesis: none;
-  text-rendering: optimizeLegibility;
-  -webkit-font-smoothing: antialiased;
-  -moz-osx-font-smoothing: grayscale;
-
-  @media (max-width: 1024px) {
-    font-size: 16px;
-  }
+  /* Asignaciones Semánticas */
+  --bg-app: #FAF9F6;
+  --bg-card: #FFFFFF;
+  --bg-sidebar: #253746; /* Pantone 7546 C */
+  --bg-sidebar-hover: #2E4254;
+  --bg-sidebar-active: #1B2834;
+  
+  --text-primary: #11120D;
+  --text-secondary: #565449;
+  --text-muted: #565449;
+  --text-inverse: #FFFFFF;
+  
+  --border: #D8CFBC;
+  --border-strong: #565449;
+  
+  --primary: #11120D;
+  --primary-hover: #565449;
+  --primary-light: #F4F1EA;
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --text: #9ca3af;
-    --text-h: #f3f4f6;
-    --bg: #16171d;
-    --border: #2e303a;
-    --code-bg: #1f2028;
-    --accent: #c084fc;
-    --accent-bg: rgba(192, 132, 252, 0.15);
-    --accent-border: rgba(192, 132, 252, 0.5);
-    --social-bg: rgba(47, 48, 58, 0.5);
-    --shadow:
-      rgba(0, 0, 0, 0.4) 0 10px 15px -3px, rgba(0, 0, 0, 0.25) 0 4px 6px -2px;
-  }
-
-  #social .button-icon {
-    filter: invert(1) brightness(2);
-  }
-}
-
-#root {
-  width: 1126px;
-  max-width: 100%;
-  margin: 0 auto;
-  text-align: center;
-  border-inline: 1px solid var(--border);
-  min-height: 100svh;
-  display: flex;
-  flex-direction: column;
+* {
   box-sizing: border-box;
 }
 
 body {
   margin: 0;
+  padding: 0;
+  font-family: var(--font-sans);
+  background-color: var(--bg-app);
+  color: var(--text-primary);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
 }
 
-h1,
-h2 {
-  font-family: var(--heading);
-  font-weight: 500;
-  color: var(--text-h);
-}
-
-h1 {
-  font-size: 56px;
-  letter-spacing: -1.68px;
-  margin: 32px 0;
-  @media (max-width: 1024px) {
-    font-size: 36px;
-    margin: 20px 0;
-  }
-}
-h2 {
-  font-size: 24px;
-  line-height: 118%;
-  letter-spacing: -0.24px;
-  margin: 0 0 8px;
-  @media (max-width: 1024px) {
-    font-size: 20px;
-  }
-}
-p {
+#root {
+  width: 100%;
+  min-height: 100vh;
   margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
 }
 
-code,
-.counter {
-  font-family: var(--mono);
-  display: inline-flex;
+/* Animaciones institucionales */
+@keyframes spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+
+/* Enlaces y botones base */
+button {
+  font-family: inherit;
   border-radius: 4px;
-  color: var(--text-h);
+  cursor: pointer;
+  transition: all 0.15s ease-in-out;
 }
 
-code {
-  font-size: 15px;
-  line-height: 135%;
-  padding: 4px 8px;
-  background: var(--code-bg);
+input, select {
+  font-family: inherit;
+  font-size: 0.95rem;
+  border: 1px solid var(--border);
+  background-color: var(--c-white);
+  color: var(--text-primary);
 }
+
+input:focus, select:focus {
+  outline: none;
+  border-color: var(--c-dark);
+}
+
+/* Tablas institucionales */
+table {
+  border-collapse: collapse;
+  width: 100%;
+}
+
+th {
+  background-color: #F5F2EB;
+  color: var(--text-secondary);
+  font-size: 0.78rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  padding: 0.75rem 1rem;
+  text-align: left;
+  border-bottom: 1px solid var(--border);
+}
+
+td {
+  padding: 0.85rem 1rem;
+  border-bottom: 1px solid #ECE7DC;
+  font-size: 0.9rem;
+}
+
+tr:last-child td {
+  border-bottom: none;
+}
+
+/* ========================================================
+   MODO RESPONSIVO INSTITUCIONAL: CELULAR vs PC / TABLET
+   - Celulares (< 768px): Menú lateral desplegable tipo 3 rayas
+   - PC y Tablets (>= 768px): Barra lateral directamente fija y visible
+   ======================================================== */
+
+.hamburger-btn {
+  display: none !important;
+}
+
+.sidebar-close-btn {
+  display: none !important;
+}
+
+.sidebar-backdrop {
+  display: none !important;
+}
+
+/* ========================================================
+   MODO RESPONSIVO: CELULAR, TABLET Y PC
+   - Celular (< 768px): Menú lateral oculto por defecto, se despliega con 3 rayas
+   - Tablet (768px - 1023px): Función opcional para cerrar / minimizar la barra lateral y ganar ancho útil
+   - PC de escritorio (>= 1024px): Barra lateral fija directamente visible
+   ======================================================== */
+
+.hamburger-btn {
+  display: none !important;
+}
+
+.sidebar-close-btn {
+  display: none !important;
+}
+
+.sidebar-backdrop {
+  display: none !important;
+}
+
+/* Reglas para PC de Escritorio (ancho >= 1024px) */
+@media (min-width: 1024px) {
+  .sidebar-container {
+    position: sticky !important;
+    top: 0 !important;
+    left: auto !important;
+    bottom: auto !important;
+    width: 250px !important;
+    min-width: 250px !important;
+    transform: none !important;
+    box-shadow: none !important;
+    border-right: 1px solid #1B2834 !important;
+    display: flex !important;
+    flex-shrink: 0 !important;
+    z-index: 20 !important;
+  }
+}
+
+/* Reglas para Celular (< 768px) y Tablet (768px - 1023px): Cierre y minimización opcional */
+@media (max-width: 1023px) {
+  .hamburger-btn {
+    display: flex !important;
+  }
+
+  .sidebar-container {
+    position: fixed !important;
+    top: 0 !important;
+    left: 0 !important;
+    bottom: 0 !important;
+    width: 270px !important;
+    min-width: 270px !important;
+    transform: translateX(-100%) !important;
+    box-shadow: 6px 0 24px rgba(0, 0, 0, 0.45) !important;
+    border-right: 1px solid #1B2834 !important;
+    transition: transform 0.25s cubic-bezier(0.4, 0, 0.2, 1) !important;
+    z-index: 100 !important;
+    display: flex !important;
+  }
+
+  .sidebar-container.open {
+    transform: translateX(0) !important;
+  }
+
+  .sidebar-backdrop {
+    display: block !important;
+    position: fixed !important;
+    inset: 0 !important;
+    background-color: rgba(37, 55, 70, 0.6) !important;
+    backdrop-filter: blur(2px) !important;
+    z-index: 90 !important;
+    transition: opacity 0.25s ease !important;
+  }
+
+  .sidebar-close-btn {
+    display: flex !important;
+  }
+}
+
+/* ========================================================
+   CUADROS DE LOS SALONES (MODO RESPONSIVO / CELULAR)
+   - Celulares (< 640px): Cuadros centrados, NO muy anchos (max 285px),
+     proporción más cuadrada que rectangular, estética amigable y moderna UI.
+   - Tablet (640px - 767px): 2 columnas centradas de cuadros cuadrados no anchos.
+   - Desktop (>= 768px): Cuadrícula fluida adaptativa.
+   ======================================================== */
+
+.salon-view-container {
+  padding: 1.25rem 1rem;
+  max-width: 1200px;
+  margin: 0 auto;
+}
+
+@media (min-width: 768px) {
+  .salon-view-container {
+    padding: 2rem;
+  }
+}
+
+.salon-cards-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: 1.25rem;
+  width: 100%;
+}
+
+@media (max-width: 639px) {
+  .salon-cards-grid {
+    display: flex !important;
+    flex-direction: column !important;
+    align-items: center !important;
+    justify-content: center !important;
+    gap: 1.25rem !important;
+    width: 100% !important;
+  }
+
+  .salon-card {
+    width: 100% !important;
+    max-width: 285px !important;
+    aspect-ratio: 1 / 1.02 !important;
+    min-height: 275px !important;
+  }
+}
+
+@media (min-width: 640px) and (max-width: 767px) {
+  .salon-cards-grid {
+    display: grid !important;
+    grid-template-columns: repeat(2, minmax(0, 285px)) !important;
+    justify-content: center !important;
+    gap: 1.25rem !important;
+  }
+
+  .salon-card {
+    width: 100% !important;
+    max-width: 285px !important;
+    aspect-ratio: 1 / 1.02 !important;
+    min-height: 275px !important;
+  }
+}
+
+.salon-card {
+  border-radius: 16px;
+  overflow: hidden;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.05), 0 1px 3px rgba(0, 0, 0, 0.03);
+  display: flex;
+  flex-direction: column;
+  transition: transform 0.18s ease, box-shadow 0.18s ease;
+  background-color: #FFFFFF;
+  box-sizing: border-box;
+}
+
+.salon-card:hover {
+  transform: translateY(-3px);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.09);
+}
+
+.salon-card-banner {
+  padding: 1.15rem 1.25rem 0.95rem 1.25rem;
+  color: #FFFFFF;
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+}
+
+.salon-card-body {
+  padding: 1.15rem 1.25rem 1.25rem 1.25rem;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  align-items: center;
+  text-align: center;
+  flex: 1;
+}
+
+.salon-card-action-btn {
+  width: 100%;
+  height: 44px;
+  border-radius: 10px;
+  font-size: 0.84rem;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  text-transform: uppercase;
+  transition: all 0.15s ease;
+  box-sizing: border-box;
+}
+
+@media (max-width: 767px) {
+  .sections-desktop-table {
+    display: none !important;
+  }
+  .sections-mobile-cards {
+    display: block !important;
+  }
+}
+
+@media (min-width: 768px) {
+  .sections-desktop-table {
+    display: block !important;
+  }
+  .sections-mobile-cards {
+    display: none !important;
+  }
+}
+
+/* ========================================================
+   ENCABEZADO Y CONTROLES LIMPIOS EN MODO CELULAR
+   - Elimina subtítulos redundantes, chips de fecha largos y
+     botones innecesarios para ir directamente a los salones.
+   ======================================================== */
+
+.app-main-header {
+  background-color: #FFFFFF;
+  border-bottom: 1px solid #D8CFBC;
+  padding: 0.85rem 1.5rem;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  gap: 0.85rem;
+  box-sizing: border-box;
+}
+
+@media (max-width: 767px) {
+  .app-main-header {
+    padding: 0.65rem 1rem !important;
+    flex-wrap: nowrap !important;
+  }
+
+  .header-subtitle {
+    display: none !important;
+  }
+
+  .header-date-chip {
+    display: none !important;
+  }
+
+  .header-sync-pill {
+    padding: 0.35rem 0.55rem !important;
+    gap: 6px !important;
+    border-radius: 20px !important;
+    margin-left: auto;
+  }
+
+  .sync-text-hide-mobile {
+    display: none !important;
+  }
+
+  .home-greeting-banner {
+    display: none !important;
+  }
+
+  .sections-controls-buttons {
+    display: none !important;
+  }
+
+  .sections-view-subtitle {
+    display: none !important;
+  }
+
+  .admin-institutional-header {
+    display: none !important;
+  }
+}
+
+

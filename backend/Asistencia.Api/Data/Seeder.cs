@@ -12,6 +12,10 @@ public sealed class SeedOptions
     /// <summary>Obligatoria si Enabled = true. Se pasa por variable de entorno (Seed__TeacherPassword).</summary>
     public string TeacherPassword { get; set; } = "";
     public string TeacherFullName { get; set; } = "Docente de Prueba";
+    public string AuxiliaryUsername { get; set; } = "auxiliar";
+    public string AuxiliaryPassword { get; set; } = "";
+    public string AdminUsername { get; set; } = "admin";
+    public string AdminPassword { get; set; } = "";
 }
 
 /// <summary>
@@ -63,6 +67,30 @@ public sealed class Seeder(AppDbContext db, ChangeLogWriter changes, IPasswordHa
 
         var teacher = new Teacher { Id = Guid.NewGuid(), UserId = user.Id, FullName = options.TeacherFullName };
         db.Teachers.Add(teacher);
+
+        // Rol AUXILIARY para reportes de asistencia general
+        var auxPassword = string.IsNullOrWhiteSpace(options.AuxiliaryPassword) ? options.TeacherPassword : options.AuxiliaryPassword;
+        var auxUser = new User
+        {
+            Id = Guid.NewGuid(),
+            InstitutionId = institution.Id,
+            Username = options.AuxiliaryUsername,
+            Role = UserRole.Auxiliary,
+        };
+        auxUser.PasswordHash = hasher.HashPassword(auxUser, auxPassword);
+        db.Users.Add(auxUser);
+
+        // Rol ADMIN para gestión institucional
+        var adminPassword = string.IsNullOrWhiteSpace(options.AdminPassword) ? options.TeacherPassword : options.AdminPassword;
+        var adminUser = new User
+        {
+            Id = Guid.NewGuid(),
+            InstitutionId = institution.Id,
+            Username = options.AdminUsername,
+            Role = UserRole.Admin,
+        };
+        adminUser.PasswordHash = hasher.HashPassword(adminUser, adminPassword);
+        db.Users.Add(adminUser);
 
         // [PROVISIONAL] Fechas del año escolar; ajustar con el calendario real.
         var year = LimaClock.Today().Year;

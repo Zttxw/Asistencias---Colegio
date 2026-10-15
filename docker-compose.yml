@@ -31,7 +31,7 @@ services:
     environment:
       ConnectionStrings__Default: "Host=db;Port=5432;Database=${POSTGRES_DB:-asistencia};Username=${POSTGRES_USER:-asistencia};Password=${POSTGRES_PASSWORD:-asistencia_dev}"
       Database__MigrateOnStartup: "true"
-      Seed__Enabled: "true"
+      SEED_DEMO: "${SEED_DEMO:-false}"
       Seed__TeacherPassword: ${SEED_TEACHER_PASSWORD:-clave-docente-segura-123}
       ASPNETCORE_ENVIRONMENT: "Development"
 

@@ -11,14 +11,14 @@ test.describe('Fase 2 — Pruebas Automatizadas Offline-First (E2E)', () => {
   test.beforeEach(async ({ page }) => {
     page.on('console', msg => console.log('PAGE LOG:', msg.type(), msg.text()));
     page.on('pageerror', err => console.log('PAGE ERROR:', err.message));
-    // Abrir página inicial
-    await page.goto('/');
+    // Abrir página inicial en modo vertical slice para validar protocolo
+    await page.goto('/?slice=legacy');
     await expect(page.getByTestId('student-name')).toBeVisible();
   });
 
   test('Escenario A: Sin conexión -> Crear asistencia -> Reconectar -> SYNCED en PostgreSQL', async ({ context, page }) => {
     // Limpiar registros previos para aislar el escenario
-    queryDb("DELETE FROM attendance_records;");
+    queryDb("DELETE FROM attendance_records; DELETE FROM class_sessions;");
     await page.evaluate(async () => {
       await (window as any).__db.attendanceRecords.clear();
       await (window as any).__db.classSessions.clear();
@@ -80,7 +80,7 @@ test.describe('Fase 2 — Pruebas Automatizadas Offline-First (E2E)', () => {
 
   test('Escenario C: Cierre a mitad de sync (petición aplicada en servidor pero ACK cortado antes de llegar a la tablet)', async ({ context, page }) => {
     // 1. Limpiar registros previos para aislar el escenario
-    queryDb("DELETE FROM attendance_records;");
+    queryDb("DELETE FROM attendance_records; DELETE FROM class_sessions;");
     await page.evaluate(async () => {
       await (window as any).__db.attendanceRecords.clear();
       await (window as any).__db.classSessions.clear();
@@ -119,7 +119,7 @@ test.describe('Fase 2 — Pruebas Automatizadas Offline-First (E2E)', () => {
     await page.close();
 
     const newPage = await context.newPage();
-    await newPage.goto('/');
+    await newPage.goto('/?slice=legacy');
 
     // Al reabrir, el registro permanece en IndexedDB con estado PENDING
     await expect(newPage.getByTestId('sync-indicator-pending')).toBeVisible();
@@ -138,7 +138,7 @@ test.describe('Fase 2 — Pruebas Automatizadas Offline-First (E2E)', () => {
 
   test('Escenario D: API detenida mantiene registros en PENDING/Error y recupera al reiniciar', async ({ page }) => {
     // Limpiar registros previos para aislar el escenario
-    queryDb("DELETE FROM attendance_records;");
+    queryDb("DELETE FROM attendance_records; DELETE FROM class_sessions;");
     await page.evaluate(async () => {
       await (window as any).__db.attendanceRecords.clear();
       await (window as any).__db.classSessions.clear();
@@ -178,7 +178,7 @@ test.describe('Fase 2 — Pruebas Automatizadas Offline-First (E2E)', () => {
 
   test('Escenario E: Reloj del navegador desfasado en pasado (2001) o futuro (2045) no altera la autoridad del servidor', async ({ page }) => {
     // Limpiar registros previos para aislar el escenario
-    queryDb("DELETE FROM attendance_records;");
+    queryDb("DELETE FROM attendance_records; DELETE FROM class_sessions;");
     await page.evaluate(async () => {
       await (window as any).__db.attendanceRecords.clear();
       await (window as any).__db.classSessions.clear();
@@ -225,5 +225,66 @@ test.describe('Fase 2 — Pruebas Automatizadas Offline-First (E2E)', () => {
 
     const clientYearFuture = queryDb("SELECT EXTRACT(YEAR FROM client_updated_at) FROM attendance_records WHERE note = 'Prueba reloj futuro 2045';");
     expect(parseInt(clientYearFuture)).toBe(2045);
+  });
+
+  test('Escenario F: Token vencido durante POST /api/sync no pierde datos, mantiene PENDING, muestra advertencia recuperable y sincroniza tras re-login', async ({ page }) => {
+    // 1. Limpiar registros previos
+    queryDb("DELETE FROM attendance_records; DELETE FROM class_sessions;");
+    await page.evaluate(async () => {
+      await (window as any).__db.attendanceRecords.clear();
+      await (window as any).__db.classSessions.clear();
+      localStorage.removeItem('token');
+    });
+    await page.reload();
+    await expect(page.getByTestId('student-name')).toBeVisible();
+
+    // 2. Establecer un JWT expirado / inválido en localStorage
+    await page.evaluate(() => {
+      localStorage.setItem('token', 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3OC0xMjM0LTEyMzQtMTIzNC0xMjM0NTY3ODEyMzQiLCJleHAiOjE1MTYyMzkwMjJ9.invalidsignature');
+    });
+
+    // 3. Registrar falta y guardar
+    await page.getByTestId('btn-status-absent').click();
+    await page.getByTestId('input-note').fill('Asistencia con token expirado');
+    await page.getByTestId('btn-save').click();
+
+    // 4. Servidor responde 401 Unauthorized:
+    // Debe mostrar la advertencia recuperable "Sesión expirada. Inicia sesión nuevamente para sincronizar."
+    await expect(page.getByTestId('auth-expired-banner')).toBeVisible({ timeout: 10000 });
+    await expect(page.getByTestId('auth-expired-banner')).toContainText('Sesión expirada. Inicia sesión nuevamente para sincronizar.');
+
+    // Indicador debe permanecer en PENDING (amarillo), no en ERROR definitivo ni SYNCED
+    await expect(page.getByTestId('sync-indicator-pending')).toBeVisible();
+    await expect(page.getByTestId('sync-indicator-pending')).toContainText('pendiente');
+
+    // 5. Verificar que en IndexedDB el registro NO fue eliminado, NO pasó a ERROR ni a SYNCED:
+    // Permanece en PENDING
+    const recordState = await page.evaluate(async () => {
+      const records = await (window as any).__db.attendanceRecords.toArray();
+      const sessions = await (window as any).__db.classSessions.toArray();
+      return {
+        attCount: records.length,
+        attSyncState: records[0]?.syncState,
+        sessCount: sessions.length,
+        sessSyncState: sessions[0]?.syncState,
+      };
+    });
+    expect(recordState.attCount).toBe(1);
+    expect(recordState.attSyncState).toBe('PENDING');
+    expect(recordState.sessCount).toBe(1);
+    expect(recordState.sessSyncState).toBe('PENDING');
+
+    // 6. Iniciar sesión nuevamente con credenciales válidas
+    await page.getByTestId('login-username').fill('docente');
+    await page.getByTestId('login-password').fill('clave-docente-segura-123');
+    await page.getByTestId('btn-login').click();
+
+    // 7. Tras el nuevo JWT y retry, debe sincronizar a 🟢 Sincronizado
+    await expect(page.getByTestId('sync-indicator-synced')).toBeVisible({ timeout: 10000 });
+    await expect(page.getByTestId('auth-expired-banner')).not.toBeVisible();
+
+    // 8. Verificar en PostgreSQL que la asistencia fue persistida correctamente
+    const countInDb = queryDb("SELECT count(*) FROM attendance_records WHERE note = 'Asistencia con token expirado' AND status = 'ABSENT';");
+    expect(parseInt(countInDb)).toBe(1);
   });
 });

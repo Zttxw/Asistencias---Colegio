@@ -11,12 +11,16 @@ export function AttendanceApp() {
   const [syncedCount, setSyncedCount] = useState(0);
   const [syncStatus, setSyncStatus] = useState<'idle' | 'syncing' | 'error'>('idle');
   const [lastSyncMsg, setLastSyncMsg] = useState<string>('Esperando sincronización');
+  const [isAuthExpired, setIsAuthExpired] = useState(false);
+  const [loginUsername, setLoginUsername] = useState('docente');
+  const [loginPassword, setLoginPassword] = useState('');
+  const [loginError, setLoginError] = useState<string | null>(null);
 
-  const [sectionId, setSectionId] = useState('7d0f1642-be34-44f3-aaf6-7cca3f0ef3ff');
+  const [sectionId, setSectionId] = useState('0f5a4cb7-e10e-4913-8474-3d39d56132e9');
   const [teacherId, setTeacherId] = useState('4fc02a4d-7d32-468c-84e3-23a5fc7689e5');
-  const [studentId, setStudentId] = useState('0a714f06-fe73-4cb1-9c21-aa5ed7b6b530');
-  const [studentName, setStudentName] = useState('Pari Ancco, Gloria');
-  const [studentCode, setStudentCode] = useState('A023');
+  const [studentId, setStudentId] = useState('f970854d-340c-4938-af48-36c6eb3292b0');
+  const [studentName, setStudentName] = useState('AGUILAR QUISPE, LIAR ANTHONY');
+  const [studentCode, setStudentCode] = useState('STU-0001');
   const [currentDate, setCurrentDate] = useState<string>(() => new Date().toISOString().split('T')[0]);
 
   const todayStr = currentDate;
@@ -29,6 +33,13 @@ export function AttendanceApp() {
 
     setPendingCount(pSessions + pAtt);
     setSyncedCount(sSessions + sAtt);
+  }, []);
+
+  useEffect(() => {
+    if (typeof window !== 'undefined') {
+      (window as any).__db = db;
+      (window as any).__setToken = (t: string) => localStorage.setItem('token', t);
+    }
   }, []);
 
   useEffect(() => {
@@ -86,19 +97,55 @@ export function AttendanceApp() {
     try {
       const summary = await syncOfflineData();
       await refreshCounts();
-      if (summary.networkError) {
+      if (summary.authExpired) {
+        // Error recuperable (Punto 6 y 7): se conserva estado PENDING sin convertir a ERROR ni borrar
+        setSyncStatus('idle');
+        setIsAuthExpired(true);
+        setLastSyncMsg('Sesión expirada. Inicia sesión nuevamente para sincronizar.');
+      } else if (summary.networkError) {
         setSyncStatus('error');
+        setIsAuthExpired(false);
         setLastSyncMsg('Error de conexión con el servidor.');
+      } else if (summary.serverError) {
+        setSyncStatus('error');
+        setIsAuthExpired(false);
+        setLastSyncMsg(summary.errorMessage || 'Error en el servidor.');
       } else if (summary.errorsCount > 0) {
         setSyncStatus('error');
+        setIsAuthExpired(false);
         setLastSyncMsg(`Error en ${summary.errorsCount} registros.`);
       } else {
         setSyncStatus('idle');
+        setIsAuthExpired(false);
         setLastSyncMsg(`Sincronizados: ${summary.syncedCount}. Pendientes: ${summary.totalPending}.`);
       }
     } catch (e: unknown) {
       setSyncStatus('error');
       setLastSyncMsg(`Fallo de conexión.`);
+    }
+  };
+
+  const handleLogin = async (e?: React.FormEvent) => {
+    if (e) e.preventDefault();
+    setLoginError(null);
+    try {
+      const res = await fetch('/api/auth/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username: loginUsername, password: loginPassword }),
+      });
+      if (!res.ok) {
+        const errData = await res.json().catch(() => ({}));
+        setLoginError(errData.error || 'Credenciales inválidas');
+        return;
+      }
+      const data = await res.json();
+      localStorage.setItem('token', data.token);
+      setIsAuthExpired(false);
+      setLoginPassword('');
+      await triggerSync();
+    } catch {
+      setLoginError('Error al conectar con el servidor.');
     }
   };
 
@@ -176,13 +223,13 @@ export function AttendanceApp() {
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1.5rem', padding: '0.8rem', background: '#fff', borderRadius: '8px', boxShadow: '0 2px 4px rgba(0,0,0,0.05)' }}>
         <div>
           {syncStatus === 'syncing' ? (
-            <span data-testid="sync-indicator-syncing" style={{ fontSize: '1.1rem', fontWeight: 600, color: '#2563eb' }}>🔄 Sincronizando...</span>
+            <span data-testid="sync-indicator-syncing" style={{ fontSize: '1rem', fontWeight: 700, color: '#11120D' }}>[~] Sincronizando...</span>
           ) : syncStatus === 'error' ? (
-            <span data-testid="sync-indicator-error" style={{ fontSize: '1.1rem', fontWeight: 600, color: '#dc2626' }}>🔴 Error de sincronización</span>
+            <span data-testid="sync-indicator-error" style={{ fontSize: '1rem', fontWeight: 700, color: '#11120D' }}>[!] Error de sincronización</span>
           ) : pendingCount > 0 ? (
-            <span data-testid="sync-indicator-pending" style={{ fontSize: '1.1rem', fontWeight: 600, color: '#d97706' }}>🟡 {pendingCount} pendiente{pendingCount > 1 ? 's' : ''}</span>
+            <span data-testid="sync-indicator-pending" style={{ fontSize: '1rem', fontWeight: 700, color: '#565449' }}>[•] {pendingCount} pendiente{pendingCount > 1 ? 's' : ''}</span>
           ) : (
-            <span data-testid="sync-indicator-synced" style={{ fontSize: '1.1rem', fontWeight: 600, color: '#16a34a' }}>🟢 Sincronizado</span>
+            <span data-testid="sync-indicator-synced" style={{ fontSize: '1rem', fontWeight: 700, color: '#11120D' }}>[✓] Sincronizado</span>
           )}
           <div data-testid="sync-message" style={{ fontSize: '0.75rem', color: '#666', marginTop: '4px' }}>
             {isOnline ? 'Conexión activa' : 'Sin conexión (Modo Offline)'} • {lastSyncMsg}
@@ -198,6 +245,64 @@ export function AttendanceApp() {
           {syncStatus === 'syncing' ? 'Sincronizando...' : 'Reintentar'}
         </button>
       </div>
+
+      {isAuthExpired && (
+        <div
+          data-testid="auth-expired-banner"
+          style={{
+            marginBottom: '1.5rem',
+            padding: '1rem',
+            background: '#FFFFFF',
+            border: '1px solid #565449',
+            borderRadius: '4px',
+            color: '#11120D',
+          }}
+        >
+          <div style={{ fontWeight: 700, marginBottom: '0.5rem', fontSize: '0.9rem' }}>
+            [!] Sesión expirada. Inicia sesión nuevamente para sincronizar.
+          </div>
+          <form onSubmit={handleLogin} style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
+            <div style={{ display: 'flex', gap: '0.5rem' }}>
+              <input
+                type="text"
+                data-testid="login-username"
+                placeholder="Usuario"
+                value={loginUsername}
+                onChange={(e) => setLoginUsername(e.target.value)}
+                style={{ flex: 1, padding: '0.45rem', borderRadius: '4px', border: '1px solid #cbd5e1' }}
+              />
+              <input
+                type="password"
+                data-testid="login-password"
+                placeholder="Contraseña"
+                value={loginPassword}
+                onChange={(e) => setLoginPassword(e.target.value)}
+                style={{ flex: 1, padding: '0.45rem', borderRadius: '4px', border: '1px solid #cbd5e1' }}
+              />
+            </div>
+            <button
+              type="submit"
+              data-testid="btn-login"
+              style={{
+                padding: '0.55rem',
+                background: '#e11d48',
+                color: '#fff',
+                border: 'none',
+                borderRadius: '4px',
+                fontWeight: 600,
+                cursor: 'pointer',
+              }}
+            >
+              Iniciar sesión y sincronizar
+            </button>
+            {loginError && (
+              <div data-testid="login-error" style={{ fontSize: '0.8rem', color: '#be123c' }}>
+                {loginError}
+              </div>
+            )}
+          </form>
+        </div>
+      )}
 
       <div style={{ background: '#fff', padding: '1.5rem', borderRadius: '8px', boxShadow: '0 2px 4px rgba(0,0,0,0.05)' }}>
         <h2 style={{ margin: '0 0 0.5rem 0', fontSize: '1.3rem' }}>Registro de Asistencia (Vertical Slice)</h2>
@@ -227,10 +332,10 @@ export function AttendanceApp() {
                 cursor: 'pointer',
               }}
             >
-              {st === 'PRESENT' && '○ Presente'}
-              {st === 'ABSENT' && '● Falta'}
-              {st === 'LATE' && '⏰ Tardanza'}
-              {st === 'EXCUSED' && '📝 Justificada'}
+              {st === 'PRESENT' && 'Presente'}
+              {st === 'ABSENT' && 'Falta'}
+              {st === 'LATE' && 'Tardanza'}
+              {st === 'EXCUSED' && 'Justificada'}
             </button>
           ))}
         </div>

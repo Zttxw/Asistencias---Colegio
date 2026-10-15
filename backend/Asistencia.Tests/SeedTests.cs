@@ -50,11 +50,19 @@ public sealed class SeedTests(PostgresFixture fx) : IClassFixture<PostgresFixtur
             await NewSeeder(db).SeedAsync(Options);
 
         await using var check = fx.CreateContext();
-        var user = await check.Users.SingleAsync();
-        Assert.NotEqual(Options.TeacherPassword, user.PasswordHash);
-        Assert.Equal(UserRole.Teacher, user.Role);
+        var teacherUser = await check.Users.FirstAsync(u => u.Role == UserRole.Teacher);
+        Assert.NotEqual(Options.TeacherPassword, teacherUser.PasswordHash);
+        Assert.Equal(UserRole.Teacher, teacherUser.Role);
         Assert.NotEqual(PasswordVerificationResult.Failed,
-            new PasswordHasher<User>().VerifyHashedPassword(user, user.PasswordHash, Options.TeacherPassword));
+            new PasswordHasher<User>().VerifyHashedPassword(teacherUser, teacherUser.PasswordHash, Options.TeacherPassword));
+
+        var auxUser = await check.Users.FirstAsync(u => u.Role == UserRole.Auxiliary);
+        Assert.NotEqual(PasswordVerificationResult.Failed,
+            new PasswordHasher<User>().VerifyHashedPassword(auxUser, auxUser.PasswordHash, Options.TeacherPassword));
+
+        var adminUser = await check.Users.FirstAsync(u => u.Role == UserRole.Admin);
+        Assert.NotEqual(PasswordVerificationResult.Failed,
+            new PasswordHasher<User>().VerifyHashedPassword(adminUser, adminUser.PasswordHash, Options.TeacherPassword));
     }
 
     [Fact]

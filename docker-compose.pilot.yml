@@ -1,0 +1,56 @@
+# ==============================================================================
+# ADVERTENCIA CRÍTICA: ENTORNO PILOTO (DATOS REALES)
+#
+# AISLAMIENTO ESTRICTO:
+# - Volumen PostgreSQL: pgdata_pilot (asistencia_pgdata_pilot)
+# - Contenedores: asistencia_pilot_db, asistencia_pilot_api
+# - Base de datos: asistencia_pilot (puerto 5433 local)
+# - API: puerto 5081 local
+# - SEED_DEMO: "false" (NO se insertan datos demo)
+# - ASPNETCORE_ENVIRONMENT: "Production" (exige JWT_SECRET >= 32 chars)
+#
+# PROHIBICIÓN:
+# NUNCA ejecutar: docker compose -f docker-compose.pilot.yml down -v
+# El flag -v destruye los volúmenes y provocaría pérdida irrevocable de datos.
+# ==============================================================================
+
+services:
+  pilot_db:
+    image: postgres:17-alpine
+    container_name: asistencia_pilot_db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${PILOT_DB_NAME:-asistencia_pilot}
+      POSTGRES_USER: ${PILOT_DB_USER:-asistencia_pilot}
+      POSTGRES_PASSWORD: ${PILOT_DB_PASSWORD:?Debe especificarse PILOT_DB_PASSWORD}
+    volumes:
+      - pgdata_pilot:/var/lib/postgresql/data
+    ports:
+      - "127.0.0.1:${PILOT_DB_PORT:-5433}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${PILOT_DB_USER:-asistencia_pilot} -d ${PILOT_DB_NAME:-asistencia_pilot}"]
+      interval: 3s
+      timeout: 3s
+      retries: 5
+
+  pilot_api:
+    build:
+      context: .
+      dockerfile: backend/Asistencia.Api/Dockerfile
+    container_name: asistencia_pilot_api
+    restart: unless-stopped
+    depends_on:
+      pilot_db:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:${PILOT_API_PORT:-5081}:5080"
+    environment:
+      ConnectionStrings__Default: "Host=pilot_db;Port=5432;Database=${PILOT_DB_NAME:-asistencia_pilot};Username=${PILOT_DB_USER:-asistencia_pilot};Password=${PILOT_DB_PASSWORD}"
+      Database__MigrateOnStartup: "true"
+      SEED_DEMO: "false"
+      ASPNETCORE_ENVIRONMENT: "Production"
+      JWT_SECRET: ${JWT_SECRET:?Debe definirse JWT_SECRET seguro de al menos 32 caracteres en entorno PILOT}
+
+volumes:
+  pgdata_pilot:
+    name: asistencia_pgdata_pilot

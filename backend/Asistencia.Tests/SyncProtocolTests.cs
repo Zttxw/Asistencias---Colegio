@@ -154,6 +154,7 @@ public sealed class SyncProtocolTests(PostgresFixture fx) : IClassFixture<Postgr
                     Entity = EntityNames.ClassSession,
                     Id = sessionId,
                     BaseVersion = 0,
+                    LocalRev = 1,
                     Data = JsonSerializer.SerializeToElement(new { sectionId = data.SectionId, teacherId = data.TeacherId, date = Day.AddDays(1), slot = "JORNADA", status = "TAKEN" })
                 },
                 new SyncPushItem
@@ -161,12 +162,13 @@ public sealed class SyncProtocolTests(PostgresFixture fx) : IClassFixture<Postgr
                     Entity = EntityNames.AttendanceRecord,
                     Id = attId,
                     BaseVersion = 0,
+                    LocalRev = 1,
                     Data = JsonSerializer.SerializeToElement(new { sessionId = sessionId, studentId = data.StudentAId, status = "ABSENT" })
                 }
             ]
         }, data.UserId);
 
-        // 2. Modificar con baseVersion = 1 -> Acepta v2
+        // 2. Modificar con baseVersion = 1 y localRev = 2 -> Acepta v2
         var updateResp = await proc.ProcessPushAsync(new SyncPushRequest
         {
             DeviceId = Dev1,
@@ -177,6 +179,7 @@ public sealed class SyncProtocolTests(PostgresFixture fx) : IClassFixture<Postgr
                     Entity = EntityNames.AttendanceRecord,
                     Id = attId,
                     BaseVersion = 1,
+                    LocalRev = 2,
                     Data = JsonSerializer.SerializeToElement(new { sessionId = sessionId, studentId = data.StudentAId, status = "LATE", note = "Llegó 15 min tarde" })
                 }
             ]
@@ -190,6 +193,140 @@ public sealed class SyncProtocolTests(PostgresFixture fx) : IClassFixture<Postgr
         Assert.NotNull(updated);
         Assert.Equal(2, updated.Version);
         Assert.Equal(AttendanceStatus.Late, updated.Status);
+    }
+
+    [Fact]
+    public async Task Push_SameDevice_DifferentData_LowerLocalRev_MatchingBaseVersion_ReturnsConflict()
+    {
+        // Caso solicitado: Mismo dispositivo + datos distintos + localRev <= lastDeviceRev + baseVersion == version -> CONFLICT
+        // Demuestra que baseVersion == version NO puede rescatar un paquete desfasado o con contador reiniciado del mismo dispositivo.
+        await using var db = fx.CreateContext();
+        var data = await BaseData.CreateAsync(db);
+        var proc = NewProcessor(db);
+
+        var sessionId = Guid.NewGuid();
+        var attId = Guid.NewGuid();
+
+        // 1. Crear registro v1 (LocalRev = 2, LastDeviceRev = 2 en BD)
+        await proc.ProcessPushAsync(new SyncPushRequest
+        {
+            DeviceId = Dev1,
+            Items =
+            [
+                new SyncPushItem
+                {
+                    Entity = EntityNames.ClassSession,
+                    Id = sessionId,
+                    BaseVersion = 0,
+                    LocalRev = 1,
+                    Data = JsonSerializer.SerializeToElement(new { sectionId = data.SectionId, teacherId = data.TeacherId, date = Day.AddDays(19), slot = "JORNADA", status = "TAKEN" })
+                },
+                new SyncPushItem
+                {
+                    Entity = EntityNames.AttendanceRecord,
+                    Id = attId,
+                    BaseVersion = 0,
+                    LocalRev = 2,
+                    Data = JsonSerializer.SerializeToElement(new { sessionId = sessionId, studentId = data.StudentAId, status = "ABSENT" })
+                }
+            ]
+        }, data.UserId);
+
+        var current = await db.AttendanceRecords.AsNoTracking().FirstAsync(r => r.Id == attId);
+        Assert.Equal(1, current.Version);
+        Assert.Equal(2, current.LastDeviceRev);
+
+        // 2. Mismo dispositivo envía actualización con baseVersion = 1 (coincidente con server version 1!),
+        // pero con LocalRev = 1 (menor que LastDeviceRev = 2) y datos distintos (LATE).
+        var resp = await proc.ProcessPushAsync(new SyncPushRequest
+        {
+            DeviceId = Dev1,
+            Items =
+            [
+                new SyncPushItem
+                {
+                    Entity = EntityNames.AttendanceRecord,
+                    Id = attId,
+                    BaseVersion = 1, // Coincide con existing.Version!
+                    LocalRev = 1,    // <= LastDeviceRev (2)
+                    Data = JsonSerializer.SerializeToElement(new { sessionId = sessionId, studentId = data.StudentAId, status = "LATE" })
+                }
+            ]
+        }, data.UserId);
+
+        Assert.Single(resp.Results);
+        Assert.Equal(SyncItemStatus.Conflict, resp.Results[0].Status);
+        Assert.Equal(1, resp.Results[0].ServerVersion);
+        Assert.NotNull(resp.Results[0].Current);
+
+        // En BD sigue siendo ABSENT v1
+        var dbAfter = await db.AttendanceRecords.AsNoTracking().FirstAsync(r => r.Id == attId);
+        Assert.Equal(AttendanceStatus.Absent, dbAfter.Status);
+        Assert.Equal(1, dbAfter.Version);
+    }
+
+    [Fact]
+    public async Task Push_OtherDevice_MatchingBaseVersion_ValidData_ReturnsAccepted()
+    {
+        // Caso solicitado: Otro dispositivo + baseVersion == version + datos válidos -> ACCEPTED
+        await using var db = fx.CreateContext();
+        var data = await BaseData.CreateAsync(db);
+        var proc = NewProcessor(db);
+
+        var sessionId = Guid.NewGuid();
+        var attId = Guid.NewGuid();
+
+        // 1. Dev1 crea registro v1
+        await proc.ProcessPushAsync(new SyncPushRequest
+        {
+            DeviceId = Dev1,
+            Items =
+            [
+                new SyncPushItem
+                {
+                    Entity = EntityNames.ClassSession,
+                    Id = sessionId,
+                    BaseVersion = 0,
+                    LocalRev = 1,
+                    Data = JsonSerializer.SerializeToElement(new { sectionId = data.SectionId, teacherId = data.TeacherId, date = Day.AddDays(20), slot = "JORNADA", status = "TAKEN" })
+                },
+                new SyncPushItem
+                {
+                    Entity = EntityNames.AttendanceRecord,
+                    Id = attId,
+                    BaseVersion = 0,
+                    LocalRev = 1,
+                    Data = JsonSerializer.SerializeToElement(new { sessionId = sessionId, studentId = data.StudentAId, status = "ABSENT" })
+                }
+            ]
+        }, data.UserId);
+
+        // 2. Dev2 (otro dispositivo sincronizado con baseVersion = 1) envía actualización válida
+        var respDev2 = await proc.ProcessPushAsync(new SyncPushRequest
+        {
+            DeviceId = Dev2, // Otro dispositivo!
+            Items =
+            [
+                new SyncPushItem
+                {
+                    Entity = EntityNames.AttendanceRecord,
+                    Id = attId,
+                    BaseVersion = 1, // Coincide con la versión del servidor
+                    LocalRev = 1,
+                    Data = JsonSerializer.SerializeToElement(new { sessionId = sessionId, studentId = data.StudentAId, status = "PRESENT" })
+                }
+            ]
+        }, data.UserId);
+
+        Assert.Single(respDev2.Results);
+        Assert.Equal(SyncItemStatus.Accepted, respDev2.Results[0].Status);
+        Assert.Equal(2, respDev2.Results[0].ServerVersion);
+
+        // En BD ahora está en versión 2 con estado PRESENT y DeviceId = Dev2
+        var updated = await db.AttendanceRecords.AsNoTracking().FirstAsync(r => r.Id == attId);
+        Assert.Equal(AttendanceStatus.Present, updated.Status);
+        Assert.Equal(2, updated.Version);
+        Assert.Equal(Dev2, updated.DeviceId);
     }
 
     [Fact]
@@ -338,6 +475,7 @@ public sealed class SyncProtocolTests(PostgresFixture fx) : IClassFixture<Postgr
                     Entity = EntityNames.ClassSession,
                     Id = sessionId,
                     BaseVersion = 0,
+                    LocalRev = 1,
                     Data = JsonSerializer.SerializeToElement(new { sectionId = data.SectionId, teacherId = data.TeacherId, date = Day.AddDays(4), slot = "JORNADA", status = "TAKEN" })
                 },
                 new SyncPushItem
@@ -345,12 +483,13 @@ public sealed class SyncProtocolTests(PostgresFixture fx) : IClassFixture<Postgr
                     Entity = EntityNames.AttendanceRecord,
                     Id = attId,
                     BaseVersion = 0,
+                    LocalRev = 1,
                     Data = JsonSerializer.SerializeToElement(new { sessionId = sessionId, studentId = data.StudentAId, status = "ABSENT" })
                 }
             ]
         }, data.UserId);
 
-        // El docente en esa misma tablet corrige a LATE antes de enterarse que fue aceptado (aún tiene baseVersion 0)
+        // El docente en esa misma tablet corrige a LATE antes de enterarse que fue aceptado (aún tiene baseVersion 0 pero localRev = 2)
         var resendResp = await proc.ProcessPushAsync(new SyncPushRequest
         {
             DeviceId = Dev1,
@@ -361,6 +500,7 @@ public sealed class SyncProtocolTests(PostgresFixture fx) : IClassFixture<Postgr
                     Entity = EntityNames.AttendanceRecord,
                     Id = attId,
                     BaseVersion = 0, // Misma tablet, continuación de cadena
+                    LocalRev = 2,
                     Data = JsonSerializer.SerializeToElement(new { sessionId = sessionId, studentId = data.StudentAId, status = "LATE" })
                 }
             ]
@@ -532,13 +672,14 @@ public sealed class SyncProtocolTests(PostgresFixture fx) : IClassFixture<Postgr
     }
 
     [Fact]
-    public async Task Push_DelayedRetryWithLowerLocalRev_ReturnsDuplicate_DoesNotOverwriteNewerEdit()
+    public async Task Push_DelayedRetryWithLowerLocalRevAndDifferentData_ReturnsConflict_DoesNotOverwriteNewerEdit()
     {
-        // Caso de revisión: Reenvío tardío desfasado en red.
+        // Caso de revisión: Reenvío tardío desfasado en red con datos distintos.
         // Tablet A aplica edición 1 (localRev = 1, status = PRESENT) -> versión 1
         // Tablet A aplica edición 2 (localRev = 2, status = LATE) -> versión 2
-        // Llega tarde el paquete de la edición 1 (localRev = 1) debido a reintento en vuelo desfasado.
-        // Debe responder duplicate y NUNCA pisar la edición 2 más reciente.
+        // Llega tarde el paquete de la edición 1 (localRev = 1, status = PRESENT).
+        // Al ser datos distintos y localRev <= LastDeviceRev, debe responder CONFLICT con current (no duplicate),
+        // y NUNCA pisar la edición 2 más reciente en base de datos.
         await using var db = fx.CreateContext();
         var data = await BaseData.CreateAsync(db);
         var proc = NewProcessor(db);
@@ -574,7 +715,7 @@ public sealed class SyncProtocolTests(PostgresFixture fx) : IClassFixture<Postgr
         Assert.All(push1.Results, r => Assert.Equal(SyncItemStatus.Accepted, r.Status));
         Assert.Equal(1, push1.Results[1].ServerVersion);
 
-        // 2. Tablet edita a LATE (localRev = 2). Supongamos que el ACK anterior se perdió o la tablet continuó su cadena (baseVersion = 0)
+        // 2. Tablet edita a LATE (localRev = 2).
         var push2 = await proc.ProcessPushAsync(new SyncPushRequest
         {
             DeviceId = Dev1,
@@ -614,16 +755,17 @@ public sealed class SyncProtocolTests(PostgresFixture fx) : IClassFixture<Postgr
                     Entity = EntityNames.AttendanceRecord,
                     Id = attId,
                     BaseVersion = 0,
-                    LocalRev = 1, // Menor que LastDeviceRev (2)
+                    LocalRev = 1, // Menor que LastDeviceRev (2) con datos distintos (PRESENT vs LATE)
                     Data = JsonSerializer.SerializeToElement(new { sessionId = sessionId, studentId = data.StudentAId, status = "PRESENT" })
                 }
             ]
         }, data.UserId);
 
-        // Debe responder duplicate
+        // Debe responder CONFLICT con el estado actual
         Assert.Single(pushDelayed.Results);
-        Assert.Equal(SyncItemStatus.Duplicate, pushDelayed.Results[0].Status);
+        Assert.Equal(SyncItemStatus.Conflict, pushDelayed.Results[0].Status);
         Assert.Equal(2, pushDelayed.Results[0].ServerVersion);
+        Assert.NotNull(pushDelayed.Results[0].Current);
 
         // Verificar que en la base de datos sigue siendo LATE y no se modificó la versión ni se incrementó el cursor de change_log
         var afterDelayed = await db.AttendanceRecords.AsNoTracking().FirstAsync(r => r.Id == attId);
@@ -633,6 +775,226 @@ public sealed class SyncProtocolTests(PostgresFixture fx) : IClassFixture<Postgr
 
         var cursorAfterDelayed = (await db.SyncCursor.FindAsync(1))!.Value;
         Assert.Equal(cursorBeforeDelayed, cursorAfterDelayed);
+    }
+
+    [Fact]
+    public async Task Push_DelayedRetryWithLowerLocalRevAndSameData_ReturnsDuplicate_NoChanges()
+    {
+        // Reenvío de paquete donde los datos son exactamente idénticos al servidor:
+        // Primero se comprueba si el dato es idéntico -> DUPLICATE
+        await using var db = fx.CreateContext();
+        var data = await BaseData.CreateAsync(db);
+        var proc = NewProcessor(db);
+
+        var sessionId = Guid.NewGuid();
+        var attId = Guid.NewGuid();
+
+        // 1. Crear sesión y asistencia inicial (localRev = 1, status = PRESENT)
+        await proc.ProcessPushAsync(new SyncPushRequest
+        {
+            DeviceId = Dev1,
+            Items =
+            [
+                new SyncPushItem
+                {
+                    Entity = EntityNames.ClassSession,
+                    Id = sessionId,
+                    BaseVersion = 0,
+                    LocalRev = 1,
+                    Data = JsonSerializer.SerializeToElement(new { sectionId = data.SectionId, teacherId = data.TeacherId, date = Day.AddDays(16), slot = "JORNADA", status = "TAKEN" })
+                },
+                new SyncPushItem
+                {
+                    Entity = EntityNames.AttendanceRecord,
+                    Id = attId,
+                    BaseVersion = 0,
+                    LocalRev = 1,
+                    Data = JsonSerializer.SerializeToElement(new { sessionId = sessionId, studentId = data.StudentAId, status = "PRESENT" })
+                }
+            ]
+        }, data.UserId);
+
+        // 2. Reenvío del mismo paquete (localRev = 1, status = PRESENT, datos idénticos)
+        var pushDup = await proc.ProcessPushAsync(new SyncPushRequest
+        {
+            DeviceId = Dev1,
+            Items =
+            [
+                new SyncPushItem
+                {
+                    Entity = EntityNames.AttendanceRecord,
+                    Id = attId,
+                    BaseVersion = 0,
+                    LocalRev = 1,
+                    Data = JsonSerializer.SerializeToElement(new { sessionId = sessionId, studentId = data.StudentAId, status = "PRESENT" })
+                }
+            ]
+        }, data.UserId);
+
+        Assert.Single(pushDup.Results);
+        Assert.Equal(SyncItemStatus.Duplicate, pushDup.Results[0].Status);
+        Assert.Equal(1, pushDup.Results[0].ServerVersion);
+    }
+
+    [Fact]
+    public async Task Push_SameDevice_ResetLocalRevWithDifferentData_ReturnsConflict()
+    {
+        // Prueba solicitada en revisión:
+        // Dispositivo con el mismo deviceId, contador localRev reiniciado a 1 y datos distintos:
+        // DEBE recibir conflict y NO duplicate.
+        await using var db = fx.CreateContext();
+        var data = await BaseData.CreateAsync(db);
+        var proc = NewProcessor(db);
+
+        var sessionId = Guid.NewGuid();
+        var attId = Guid.NewGuid();
+
+        // 1. Tablet Dev1 registra asistencia con localRev = 2 (versión 1 en servidor, LastDeviceRev = 2)
+        var pushInit = await proc.ProcessPushAsync(new SyncPushRequest
+        {
+            DeviceId = Dev1,
+            Items =
+            [
+                new SyncPushItem
+                {
+                    Entity = EntityNames.ClassSession,
+                    Id = sessionId,
+                    BaseVersion = 0,
+                    LocalRev = 1,
+                    Data = JsonSerializer.SerializeToElement(new { sectionId = data.SectionId, teacherId = data.TeacherId, date = Day.AddDays(17), slot = "JORNADA", status = "TAKEN" })
+                },
+                new SyncPushItem
+                {
+                    Entity = EntityNames.AttendanceRecord,
+                    Id = attId,
+                    BaseVersion = 0,
+                    LocalRev = 2,
+                    Data = JsonSerializer.SerializeToElement(new { sessionId = sessionId, studentId = data.StudentAId, status = "PRESENT" })
+                }
+            ]
+        }, data.UserId);
+
+        Assert.Equal(SyncItemStatus.Accepted, pushInit.Results[1].Status);
+
+        var serverRecord = await db.AttendanceRecords.AsNoTracking().FirstAsync(r => r.Id == attId);
+        Assert.Equal(2, serverRecord.LastDeviceRev);
+        Assert.Equal(AttendanceStatus.Present, serverRecord.Status);
+
+        // 2. Supongamos que la tablet reinicia su contador localRev a 1 (mismo Dev1) e intenta enviar un cambio distinto (LATE)
+        var pushReset = await proc.ProcessPushAsync(new SyncPushRequest
+        {
+            DeviceId = Dev1,
+            Items =
+            [
+                new SyncPushItem
+                {
+                    Entity = EntityNames.AttendanceRecord,
+                    Id = attId,
+                    BaseVersion = 1,
+                    LocalRev = 1, // Reiniciado a 1, menor que LastDeviceRev (2) con datos distintos
+                    Data = JsonSerializer.SerializeToElement(new { sessionId = sessionId, studentId = data.StudentAId, status = "LATE" })
+                }
+            ]
+        }, data.UserId);
+
+        // DEBE responder conflict (nunca duplicate), para que la tablet no muestre falsamente "Sincronizado" perdiendo la edición
+        Assert.Single(pushReset.Results);
+        Assert.Equal(SyncItemStatus.Conflict, pushReset.Results[0].Status);
+        Assert.Equal(1, pushReset.Results[0].ServerVersion);
+        Assert.NotNull(pushReset.Results[0].Current);
+
+        // Los datos en el servidor permanecen intactos
+        var dbAfter = await db.AttendanceRecords.AsNoTracking().FirstAsync(r => r.Id == attId);
+        Assert.Equal(AttendanceStatus.Present, dbAfter.Status);
+    }
+
+    [Fact]
+    public async Task Push_InterleavedOtherDevice_DevAResendsWithHigherLocalRev_ReturnsConflict()
+    {
+        // Prueba de dispositivo ajeno intercalado:
+        // A edita, B edita, A reenvía con localRev mayor -> conflict (no accepted ni duplicate)
+        await using var db = fx.CreateContext();
+        var data = await BaseData.CreateAsync(db);
+        var proc = NewProcessor(db);
+
+        var sessionId = Guid.NewGuid();
+        var attId = Guid.NewGuid();
+
+        // 1. Tablet A crea asistencia (status = ABSENT, localRev = 1) -> versión 1 en servidor (DeviceId = Dev1, LastDeviceRev = 1)
+        var pushA1 = await proc.ProcessPushAsync(new SyncPushRequest
+        {
+            DeviceId = Dev1,
+            Items =
+            [
+                new SyncPushItem
+                {
+                    Entity = EntityNames.ClassSession,
+                    Id = sessionId,
+                    BaseVersion = 0,
+                    LocalRev = 1,
+                    Data = JsonSerializer.SerializeToElement(new { sectionId = data.SectionId, teacherId = data.TeacherId, date = Day.AddDays(18), slot = "JORNADA", status = "TAKEN" })
+                },
+                new SyncPushItem
+                {
+                    Entity = EntityNames.AttendanceRecord,
+                    Id = attId,
+                    BaseVersion = 0,
+                    LocalRev = 1,
+                    Data = JsonSerializer.SerializeToElement(new { sessionId = sessionId, studentId = data.StudentAId, status = "ABSENT" })
+                }
+            ]
+        }, data.UserId);
+        Assert.All(pushA1.Results, r => Assert.Equal(SyncItemStatus.Accepted, r.Status));
+
+        // 2. Tablet B edita la asistencia a PRESENT con baseVersion = 1 -> versión 2 en servidor (DeviceId = Dev2)
+        var pushB = await proc.ProcessPushAsync(new SyncPushRequest
+        {
+            DeviceId = Dev2,
+            Items =
+            [
+                new SyncPushItem
+                {
+                    Entity = EntityNames.AttendanceRecord,
+                    Id = attId,
+                    BaseVersion = 1,
+                    LocalRev = 1,
+                    Data = JsonSerializer.SerializeToElement(new { sessionId = sessionId, studentId = data.StudentAId, status = "PRESENT" })
+                }
+            ]
+        }, data.UserId);
+        Assert.Single(pushB.Results);
+        Assert.Equal(SyncItemStatus.Accepted, pushB.Results[0].Status);
+        Assert.Equal(2, pushB.Results[0].ServerVersion);
+
+        // 3. Tablet A (que estaba desactualizada o perdió ACK) envía edición con localRev = 2 (mayor que su rev anterior y mayor que Dev2),
+        // pero con baseVersion = 1 y status = LATE.
+        var pushA2 = await proc.ProcessPushAsync(new SyncPushRequest
+        {
+            DeviceId = Dev1,
+            Items =
+            [
+                new SyncPushItem
+                {
+                    Entity = EntityNames.AttendanceRecord,
+                    Id = attId,
+                    BaseVersion = 1, // Desactualizada frente a v2 en servidor
+                    LocalRev = 2,
+                    Data = JsonSerializer.SerializeToElement(new { sessionId = sessionId, studentId = data.StudentAId, status = "LATE" })
+                }
+            ]
+        }, data.UserId);
+
+        // Como el último dispositivo que escribió fue Dev2, Dev1 no puede continuar cadena. Debe recibir CONFLICT con current (Dev2)
+        Assert.Single(pushA2.Results);
+        Assert.Equal(SyncItemStatus.Conflict, pushA2.Results[0].Status);
+        Assert.Equal(2, pushA2.Results[0].ServerVersion);
+        Assert.NotNull(pushA2.Results[0].Current);
+
+        // En base de datos el registro sigue siendo PRESENT de Dev2 en versión 2
+        var currentDb = await db.AttendanceRecords.AsNoTracking().FirstAsync(r => r.Id == attId);
+        Assert.Equal(AttendanceStatus.Present, currentDb.Status);
+        Assert.Equal(2, currentDb.Version);
+        Assert.Equal(Dev2, currentDb.DeviceId);
     }
 
     [Fact]

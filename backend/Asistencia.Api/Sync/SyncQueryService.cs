@@ -15,10 +15,50 @@ public sealed class SyncQueryService(AppDbContext db)
     /// y devolviendo el estado actual. Regla 6.2: nextCursor avanza hasta el máximo server_change_id
     /// incluido en la página consultada.
     /// </summary>
-    public async Task<SyncChangesResponse> GetChangesAsync(long cursor, int limit = DefaultLimit, CancellationToken ct = default)
+    public Task<SyncChangesResponse> GetChangesAsync(long cursor, int limit, CancellationToken ct)
+        => GetChangesAsync(cursor, limit, null, ct);
+
+    public async Task<SyncChangesResponse> GetChangesAsync(long cursor, int limit = DefaultLimit, Guid? requestingUserId = null, CancellationToken ct = default)
     {
         if (limit <= 0) limit = DefaultLimit;
         if (limit > MaxLimit) limit = MaxLimit;
+
+        // Cargar información de autorización si se proporciona usuario
+        List<Guid>? allowedSectionIds = null;
+        List<Guid>? allowedStudentIds = null;
+        Guid? institutionId = null;
+
+        if (requestingUserId.HasValue)
+        {
+            var user = await db.Users.AsNoTracking().FirstOrDefaultAsync(u => u.Id == requestingUserId.Value, ct);
+            if (user != null)
+            {
+                institutionId = user.InstitutionId;
+                if (user.Role == UserRole.Teacher)
+                {
+                    var teacher = await db.Teachers.AsNoTracking().FirstOrDefaultAsync(t => t.UserId == user.Id, ct);
+                    if (teacher != null)
+                    {
+                        allowedSectionIds = await db.SectionTeachers.AsNoTracking()
+                            .Where(st => st.TeacherId == teacher.Id)
+                            .Select(st => st.SectionId)
+                            .ToListAsync(ct);
+
+                        allowedStudentIds = await db.Enrollments.AsNoTracking()
+                            .Where(e => allowedSectionIds.Contains(e.SectionId))
+                            .Select(e => e.StudentId)
+                            .Distinct()
+                            .ToListAsync(ct);
+                    }
+                    else
+                    {
+                        allowedSectionIds = [];
+                        allowedStudentIds = [];
+                    }
+                }
+                // Si es Auxiliary o Admin, allowedSectionIds queda en null (acceso a las secciones de la institución)
+            }
+        }
 
         // Leer página de change_log por orden estricto de server_change_id
         var rawEntries = await db.ChangeLog
@@ -54,7 +94,7 @@ public sealed class SyncQueryService(AppDbContext db)
 
         foreach (var entry in distinctTargets)
         {
-            var data = await LoadCurrentEntityDataAsync(entry.Entity, entry.EntityId, ct);
+            var data = await LoadCurrentEntityDataAsync(entry.Entity, entry.EntityId, institutionId, allowedSectionIds, allowedStudentIds, ct);
             if (data != null)
             {
                 changeDtos.Add(new EntityChangeDto
@@ -80,12 +120,18 @@ public sealed class SyncQueryService(AppDbContext db)
         };
     }
 
-    private async Task<object?> LoadCurrentEntityDataAsync(string entity, Guid entityId, CancellationToken ct)
+    private async Task<object?> LoadCurrentEntityDataAsync(
+        string entity,
+        Guid entityId,
+        Guid? institutionId,
+        List<Guid>? allowedSectionIds,
+        List<Guid>? allowedStudentIds,
+        CancellationToken ct)
     {
         return entity switch
         {
             EntityNames.AcademicYear => await db.AcademicYears.AsNoTracking()
-                .Where(x => x.Id == entityId)
+                .Where(x => x.Id == entityId && (!institutionId.HasValue || x.InstitutionId == institutionId.Value))
                 .Select(x => new
                 {
                     id = x.Id,
@@ -96,7 +142,9 @@ public sealed class SyncQueryService(AppDbContext db)
                 }).FirstOrDefaultAsync(ct),
 
             EntityNames.Section => await db.Sections.AsNoTracking()
-                .Where(x => x.Id == entityId)
+                .Where(x => x.Id == entityId &&
+                            (!institutionId.HasValue || x.InstitutionId == institutionId.Value) &&
+                            (allowedSectionIds == null || allowedSectionIds.Contains(x.Id)))
                 .Select(x => new
                 {
                     id = x.Id,
@@ -107,7 +155,8 @@ public sealed class SyncQueryService(AppDbContext db)
                 }).FirstOrDefaultAsync(ct),
 
             EntityNames.SectionTeacher => await db.SectionTeachers.AsNoTracking()
-                .Where(x => x.Id == entityId)
+                .Where(x => x.Id == entityId &&
+                            (allowedSectionIds == null || allowedSectionIds.Contains(x.SectionId)))
                 .Select(x => new
                 {
                     id = x.Id,
@@ -116,7 +165,9 @@ public sealed class SyncQueryService(AppDbContext db)
                 }).FirstOrDefaultAsync(ct),
 
             EntityNames.Student => await db.Students.AsNoTracking()
-                .Where(x => x.Id == entityId)
+                .Where(x => x.Id == entityId &&
+                            (!institutionId.HasValue || x.InstitutionId == institutionId.Value) &&
+                            (allowedStudentIds == null || allowedStudentIds.Contains(x.Id)))
                 .Select(x => new
                 {
                     id = x.Id,
@@ -126,7 +177,8 @@ public sealed class SyncQueryService(AppDbContext db)
                 }).FirstOrDefaultAsync(ct),
 
             EntityNames.Enrollment => await db.Enrollments.AsNoTracking()
-                .Where(x => x.Id == entityId)
+                .Where(x => x.Id == entityId &&
+                            (allowedSectionIds == null || allowedSectionIds.Contains(x.SectionId)))
                 .Select(x => new
                 {
                     id = x.Id,
@@ -139,7 +191,8 @@ public sealed class SyncQueryService(AppDbContext db)
                 }).FirstOrDefaultAsync(ct),
 
             EntityNames.ClassSession => await db.ClassSessions.AsNoTracking()
-                .Where(x => x.Id == entityId)
+                .Where(x => x.Id == entityId &&
+                            (allowedSectionIds == null || allowedSectionIds.Contains(x.SectionId)))
                 .Select(x => new
                 {
                     id = x.Id,
@@ -153,18 +206,20 @@ public sealed class SyncQueryService(AppDbContext db)
                     serverChangeId = x.ServerChangeId
                 }).FirstOrDefaultAsync(ct),
 
-            EntityNames.AttendanceRecord => await db.AttendanceRecords.AsNoTracking()
-                .Where(x => x.Id == entityId)
-                .Select(x => new
+            EntityNames.AttendanceRecord => await (
+                from r in db.AttendanceRecords.AsNoTracking()
+                join s in db.ClassSessions.AsNoTracking() on r.SessionId equals s.Id
+                where r.Id == entityId && (allowedSectionIds == null || allowedSectionIds.Contains(s.SectionId))
+                select new
                 {
-                    id = x.Id,
-                    sessionId = x.SessionId,
-                    studentId = x.StudentId,
-                    status = x.Status.ToString().ToUpperInvariant(),
-                    note = x.Note,
-                    isVoid = x.IsVoid,
-                    version = x.Version,
-                    serverChangeId = x.ServerChangeId
+                    id = r.Id,
+                    sessionId = r.SessionId,
+                    studentId = r.StudentId,
+                    status = r.Status.ToString().ToUpperInvariant(),
+                    note = r.Note,
+                    isVoid = r.IsVoid,
+                    version = r.Version,
+                    serverChangeId = r.ServerChangeId
                 }).FirstOrDefaultAsync(ct),
 
             _ => null

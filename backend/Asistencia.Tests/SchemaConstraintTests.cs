@@ -98,6 +98,11 @@ public sealed class SchemaConstraintTests(PostgresFixture fx) : IClassFixture<Po
         };
         db.Sections.Add(otherSection);
 
+        // Limpiar matrícula inicial de BaseData para este test de traslados
+        var existing = await db.Enrollments.Where(e => e.StudentId == data.StudentAId).ToListAsync();
+        db.Enrollments.RemoveRange(existing);
+        await db.SaveChangesAsync();
+
         // Traslado: la matrícula anterior queda WITHDRAWN y se crea una nueva ACTIVE.
         db.Enrollments.AddRange(
             NewEnrollment(data, data.SectionId, EnrollmentStatus.Withdrawn, new DateOnly(2026, 3, 1), new DateOnly(2026, 6, 30)),

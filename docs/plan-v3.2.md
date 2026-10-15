@@ -111,19 +111,29 @@ Response (un resultado por ítem, mismo orden):
   "serverCursor": 1042
 }
 ```
-Reglas por ítem, dentro de una transacción:
-1. No existe el id → insertar version = 1, last_device_rev = localRev → accepted. Si choca con índice único → conflict con el registro existente. Para sesión, la tablet adopta el sessionId canónico en la sesión y sus asistencias pendientes y reintenta.
-2. Existe y data idéntico → duplicate (sin cambiar versión ni change_log).
-3. Existe y baseVersion == version → aplicar, version + 1, last_device_rev = localRev, change_log → accepted.
-3b. Regla 3b (Continuación de cadena por ACK perdido y protección ante reenvío tardío vía `localRev`):
-- Si `deviceId` coincide con el último dispositivo del registro:
-  - Si `localRev <= last_device_rev`: es un reenvío tardío o desfasado de un paquete en vuelo. Responde `duplicate` sin modificar el registro ni la versión (evita que una edición vieja pise una nueva).
-  - Si `localRev > last_device_rev`: es una edición más reciente de la misma tablet tras un ACK perdido. Se acepta (`accepted`, version + 1, last_device_rev = localRev, change_log).
-- Si `deviceId` difiere y `baseVersion < version`: responde `conflict` con current (regla 4). Un dispositivo ajeno nunca sobrescribe con versiones desactualizadas.
-4. Existe y baseVersion < version con datos distintos → conflict con current. No sobrescribir.
-5. Datos inválidos → rejected con mensaje.
+Reglas de procesamiento por ítem (dentro de una transacción atómica por lote):
 
-Idempotente. Un fallo en un ítem no aborta el lote. Orden recibido: sesión antes que sus asistencias.
+1. **¿Datos lógicos idénticos al servidor? (Idempotencia)**
+   - **SÍ → Regla 1 (`duplicate`):** responde `duplicate` sin modificar el registro, versión ni `change_log`.
+   - **NO (datos distintos) ↓**
+
+2. **¿Es el MISMO dispositivo (`deviceId == existing.DeviceId`)?**
+   - **SÍ:**
+     - Si `localRev > existing.LastDeviceRev`: **Regla 2 (`accepted`)** → edición válida o continuación de cadena tras ACK perdido. Aplica cambios, `version += 1`, `last_device_rev = localRev`, registra en `change_log`.
+     - Si `localRev <= existing.LastDeviceRev`: **Regla 3 (`conflict` con `current`)** → paquete rezagado o reinicio de contador (servidor intacto, no `duplicate`).
+     - *Regla cardinal:* **Para el mismo dispositivo, `baseVersion` NO participa en la decisión.** Ni siquiera un `baseVersion == version` puede rescatar un paquete desfasado o con contador reiniciado.
+   - **NO (otro dispositivo):**
+     - Si `baseVersion == existing.Version`: **Regla 4a (`accepted`)** → edición concurrente válida de un dispositivo al día. Aplica cambios, `version += 1`, `deviceId = request.DeviceId`, `last_device_rev = localRev > 0 ? localRev : 1`, registra en `change_log`.
+     - Si `baseVersion < existing.Version`: **Regla 4b (`conflict` con `current`)** → dispositivo ajeno desactualizado. Nunca sobrescribe.
+
+3. **Inserción nueva (el ID no existe previamente):**
+   - Si colisiona con el índice único de sesión (`section_id`, `date`, `slot`) o asistencia (`session_id`, `student_id`) → `conflict` con el registro canónico existente (la tablet adopta el ID canónico y reasigna).
+   - Si no colisiona → se inserta con `version = 1`, `last_device_rev = localRev > 0 ? localRev : 1`, `change_log` → `accepted`.
+
+4. **Regla 5 — Datos inválidos (`rejected`):**
+   - JSON corrupto, enumeraciones no válidas, o claves foráneas inexistentes (ej. alumno o sesión no encontrada) → responde `rejected` con mensaje explicativo. No aborta los demás ítems del lote.
+
+Orden de procesamiento: sesión antes que sus asistencias asociadas. Un fallo en un ítem no aborta el lote.
 
 ### 6.2 Bajada: `GET /sync/changes?cursor=N`
 
